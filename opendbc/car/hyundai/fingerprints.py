@@ -1134,9 +1134,11 @@ FW_VERSIONS = {
       b'\xf1\x00JK1EMFC  AT AUS RHD 1.00 1.01 99211-DS100 220125',
       b'\xf1\x00JK1EMFC  AT USA LHD 1.00 1.00 99211-IT100 220919',
       b'\xf1\x00JK1EMFC  AT USA LHD 1.00 1.01 99211-IT100 230628',
+      b'\xf1\x00JK1EMFC  AT USA LHD 1.00 1.02 99211-IT100 240123',
     ],
     (Ecu.fwdRadar, 0x7d0, None): [
       b'\xf1\x00JKev SCC -----      1.00 1.01 99110-DS000         ',
+      b'\xf1\x00JKev SCC -----      1.00 1.00 99110-DS100         ',
     ],
   },
   CAR.GENESIS_GV60_EV_1ST_GEN: {
