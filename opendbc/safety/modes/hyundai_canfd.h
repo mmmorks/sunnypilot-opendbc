@@ -245,12 +245,15 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *msg) {
 static bool hyundai_canfd_fwd_hook(int bus_num, int addr) {
   bool block = false;
 
-  if (hyundai_canfd_dynamic_handoff) {
-    // Longitudinal addresses openpilot owns when engaged: SCC_CONTROL and the ADRV cluster.
+  // Only apply longitudinal forwarding control for LKA-steering long users.
+  // LFA-steering long uses static TX-list blocking (check_relay) for 0x1A0.
+  if (hyundai_longitudinal && hyundai_canfd_lka_steering) {
     const int handoff_addrs[] = {0x1a0, 0x51, 0x160, 0x1EA, 0x200, 0x345, 0x1DA};
     for (size_t i = 0; i < sizeof(handoff_addrs) / sizeof(handoff_addrs[0]); i++) {
       if (addr == handoff_addrs[i]) {
-        block = controls_allowed;
+        // Without dynamic handoff: always block (preserves pre-PR static-blocking behavior).
+        // With dynamic handoff: block only when openpilot is the longitudinal authority.
+        block = !hyundai_canfd_dynamic_handoff || controls_allowed;
         break;
       }
     }

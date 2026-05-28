@@ -216,6 +216,11 @@ class TestHyundaiCanfdLKASteeringLongEV(HyundaiLongitudinalBase, TestHyundaiCanf
 
   RELAY_MALFUNCTION_ADDRS = {0: (0x50, 0x2a4), 1: (0x1a0,)}  # LKAS, CAM_0x2A4, SCC_CONTROL
 
+  # Longitudinal addresses blocked by the fwd hook on both forwarding directions.
+  # fwd hook blocks these regardless of source bus when longitudinal + LKA-steering.
+  _LONG_FWD_BLOCKED = [0x51, 0x160, 0x1a0, 0x1da, 0x1ea, 0x200, 0x345]
+  FWD_BLACKLISTED_ADDRS = {2: [0x50, 0x2a4] + _LONG_FWD_BLOCKED, 0: _LONG_FWD_BLOCKED}
+
   DISABLED_ECU_UDS_MSG = (0x730, 1)
   DISABLED_ECU_ACTUATION_MSG = (0x1a0, 1)
 
@@ -315,6 +320,10 @@ class TestHyundaiCanfdLKASteeringLongDynamicHandoff(TestHyundaiCanfdLKASteeringL
   Mirrors TestHyundaiCanfdLKASteeringLongEV but with the dynamic handoff flag added.
   """
 
+  # With dynamic handoff and controls_allowed=False (test_fwd_hook default), the fwd hook
+  # forwards longitudinal addresses to let stock SCC pass through. Only LKAS outputs are blocked.
+  FWD_BLACKLISTED_ADDRS = {2: [0x50, 0x2a4]}
+
   def setUp(self):
     self.packer = CANPackerSafety("hyundai_canfd_generated")
     self.safety = libsafety_py.libsafety
@@ -371,6 +380,20 @@ class TestHyundaiCanfdLKASteeringLongDynamicHandoff(TestHyundaiCanfdLKASteeringL
     self.safety.set_controls_allowed(False)
     result = self.safety.safety_fwd_hook(2, 0x160)
     self.assertNotEqual(-1, result)
+
+  def test_uds_path_730_tx_allowed_when_disengaged(self):
+    """0x730 (UDS tester-present) must be accepted by TX hook regardless of controls_allowed."""
+    from opendbc.safety.tests.libsafety import libsafety_py as _lspy
+    self.safety.set_controls_allowed(False)
+    msg = _lspy.make_CANPacket(0x730, 1, b"\x02\x3E\x80\x00\x00\x00\x00\x00")
+    self.assertTrue(self._tx(msg))
+
+  def test_uds_path_730_tx_allowed_when_engaged(self):
+    """0x730 (UDS tester-present) must be accepted by TX hook regardless of controls_allowed."""
+    from opendbc.safety.tests.libsafety import libsafety_py as _lspy
+    self.safety.set_controls_allowed(True)
+    msg = _lspy.make_CANPacket(0x730, 1, b"\x02\x3E\x80\x00\x00\x00\x00\x00")
+    self.assertTrue(self._tx(msg))
 
   def test_accel_actuation_limits(self):
     """
@@ -445,17 +468,15 @@ class TestHyundaiCanfdNoHandoffRegression(TestHyundaiCanfdLKASteeringLongEV):
     msg = self.packer.make_can_msg_safety("SCC_CONTROL", self.PT_BUS, {"aReqRaw": 0.0, "aReqValue": 0.0})
     self.assertTrue(self._tx(msg))
 
-  def test_stock_scc_forwarded_when_disengaged(self):
-    """Without dynamic handoff, stock SCC (0x1A0) forwarding is NOT blocked when controls_allowed=False."""
+  def test_stock_scc_blocked_when_disengaged(self):
+    """Without dynamic handoff, stock SCC (0x1A0) must be blocked regardless of controls_allowed state."""
     self.safety.set_controls_allowed(False)
-    result = self.safety.safety_fwd_hook(2, 0x1A0)
-    self.assertNotEqual(-1, result)
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x1A0))
 
-  def test_stock_scc_forwarded_when_engaged(self):
-    """Without dynamic handoff, stock SCC (0x1A0) forwarding is NOT blocked when controls_allowed=True."""
+  def test_stock_scc_blocked_when_engaged(self):
+    """Without dynamic handoff, stock SCC (0x1A0) must be blocked regardless of controls_allowed state."""
     self.safety.set_controls_allowed(True)
-    result = self.safety.safety_fwd_hook(2, 0x1A0)
-    self.assertNotEqual(-1, result)
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x1A0))
 
 
 if __name__ == "__main__":
