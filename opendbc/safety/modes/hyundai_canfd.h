@@ -23,6 +23,9 @@
 #define HYUNDAI_CANFD_SCC_CONTROL_COMMON_TX_MSGS(e_can, longitudinal) \
   {0x1A0, e_can, 32, .check_relay = (longitudinal)},  /* SCC_CONTROL */ \
 
+#define HYUNDAI_CANFD_SCC_CONTROL_HANDOFF_TX_MSGS(e_can, longitudinal) \
+  {0x1A0, e_can, 32, .check_relay = (longitudinal), .disable_static_blocking = true},  /* SCC_CONTROL (dynamic handoff: forwarding controlled by fwd hook) */ \
+
 // *** Addresses checked in rx hook ***
 // EV, ICE, HYBRID: ACCELERATOR (0x35), ACCELERATOR_BRAKE_ALT (0x100), ACCELERATOR_ALT (0x105)
 #define HYUNDAI_CANFD_COMMON_RX_CHECKS(pt_bus)                                                                          \
@@ -239,6 +242,24 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *msg) {
   return tx;
 }
 
+static bool hyundai_canfd_fwd_hook(int bus_num, int addr) {
+  bool block = false;
+
+  if (hyundai_canfd_dynamic_handoff) {
+    // Longitudinal addresses openpilot owns when engaged: SCC_CONTROL and the ADRV cluster.
+    const int handoff_addrs[] = {0x1a0, 0x51, 0x160, 0x1EA, 0x200, 0x345, 0x1DA};
+    for (size_t i = 0; i < sizeof(handoff_addrs) / sizeof(handoff_addrs[0]); i++) {
+      if (addr == handoff_addrs[i]) {
+        block = controls_allowed;
+        break;
+      }
+    }
+  }
+
+  (void)bus_num;  // not used; framework already routes via get_fwd_bus
+  return block;
+}
+
 static safety_config hyundai_canfd_init(uint16_t param) {
   const uint16_t HYUNDAI_PARAM_CANFD_LKA_STEERING_ALT = 128;
   const uint16_t HYUNDAI_PARAM_CANFD_ALT_BUTTONS = 32;
@@ -255,14 +276,14 @@ static safety_config hyundai_canfd_init(uint16_t param) {
   static const CanMsg HYUNDAI_CANFD_LKA_STEERING_LONG_TX_MSGS[] = {
     HYUNDAI_CANFD_LKA_STEERING_COMMON_TX_MSGS(0, 1)
     HYUNDAI_CANFD_LFA_STEERING_COMMON_TX_MSGS(1)
-    HYUNDAI_CANFD_SCC_CONTROL_COMMON_TX_MSGS(1, true)
-    {0x51,  0, 32, .check_relay = false},  // ADRV_0x51
+    HYUNDAI_CANFD_SCC_CONTROL_HANDOFF_TX_MSGS(1, true)
+    {0x51,  0, 32, .check_relay = false, .disable_static_blocking = true},  // ADRV_0x51
     {0x730, 1,  8, .check_relay = false},  // tester present for ADAS ECU disable
-    {0x160, 1, 16, .check_relay = false},  // ADRV_0x160
-    {0x1EA, 1, 32, .check_relay = false},  // ADRV_0x1ea
-    {0x200, 1,  8, .check_relay = false},  // ADRV_0x200
-    {0x345, 1,  8, .check_relay = false},  // ADRV_0x345
-    {0x1DA, 1, 32, .check_relay = false},  // ADRV_0x1da
+    {0x160, 1, 16, .check_relay = false, .disable_static_blocking = true},  // ADRV_0x160
+    {0x1EA, 1, 32, .check_relay = false, .disable_static_blocking = true},  // ADRV_0x1ea
+    {0x200, 1,  8, .check_relay = false, .disable_static_blocking = true},  // ADRV_0x200
+    {0x345, 1,  8, .check_relay = false, .disable_static_blocking = true},  // ADRV_0x345
+    {0x1DA, 1, 32, .check_relay = false, .disable_static_blocking = true},  // ADRV_0x1da
   };
 
   static const CanMsg HYUNDAI_CANFD_LFA_STEERING_TX_MSGS[] = {
@@ -402,6 +423,7 @@ const safety_hooks hyundai_canfd_hooks = {
   .init = hyundai_canfd_init,
   .rx = hyundai_canfd_rx_hook,
   .tx = hyundai_canfd_tx_hook,
+  .fwd = hyundai_canfd_fwd_hook,
   .get_counter = hyundai_canfd_get_counter,
   .get_checksum = hyundai_canfd_get_checksum,
   .compute_checksum = hyundai_common_canfd_compute_checksum,

@@ -350,6 +350,28 @@ class TestHyundaiCanfdLKASteeringLongDynamicHandoff(TestHyundaiCanfdLKASteeringL
     msg = _lspy.make_CANPacket(0x160, 1, b'\x00' * 16)
     self.assertTrue(self._tx(msg))
 
+  def test_fwd_hook_scc_control_blocked_when_controls_allowed(self):
+    """When engaged (controls_allowed=True), stock SCC_CONTROL must NOT be forwarded to vehicle CAN."""
+    self.safety.set_controls_allowed(True)
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x1A0))
+
+  def test_fwd_hook_scc_control_forwarded_when_not_controls_allowed(self):
+    """When disengaged (controls_allowed=False), stock SCC_CONTROL must be forwarded to vehicle CAN."""
+    self.safety.set_controls_allowed(False)
+    result = self.safety.safety_fwd_hook(2, 0x1A0)
+    self.assertNotEqual(-1, result)
+
+  def test_fwd_hook_adrv_0x160_blocked_when_controls_allowed(self):
+    """When engaged (controls_allowed=True), stock ADRV 0x160 must NOT be forwarded to vehicle CAN."""
+    self.safety.set_controls_allowed(True)
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x160))
+
+  def test_fwd_hook_adrv_0x160_forwarded_when_not_controls_allowed(self):
+    """When disengaged (controls_allowed=False), stock ADRV 0x160 must be forwarded to vehicle CAN."""
+    self.safety.set_controls_allowed(False)
+    result = self.safety.safety_fwd_hook(2, 0x160)
+    self.assertNotEqual(-1, result)
+
   def test_accel_actuation_limits(self):
     """
     Under dynamic handoff, ALL SCC_CONTROL is blocked when controls_allowed=False —
