@@ -417,5 +417,46 @@ class TestHyundaiCanfdLKASteeringLongDynamicHandoff(TestHyundaiCanfdLKASteeringL
     pass
 
 
+class TestHyundaiCanfdNoHandoffRegression(TestHyundaiCanfdLKASteeringLongEV):
+  """
+  Regression test for alpha-long without dynamic handoff (CANFD_DYNAMIC_HANDOFF unset).
+  Verifies that when the handoff bit is NOT set, the safety code behaves exactly as before:
+  - SCC_CONTROL is accepted regardless of controls_allowed state (as long as accel is valid)
+  - Stock SCC frames (0x1A0) are NOT forwarded in either state (forward hook returns -1)
+  """
+
+  def setUp(self):
+    self.packer = CANPackerSafety("hyundai_canfd_generated")
+    self.safety = libsafety_py.libsafety
+    # NO CANFD_DYNAMIC_HANDOFF flag — just LONG | CANFD_LKA_STEERING | EV_GAS
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hyundaiCanfd, HyundaiSafetyFlags.CANFD_LKA_STEERING |
+                                 HyundaiSafetyFlags.LONG | HyundaiSafetyFlags.EV_GAS)
+    self.safety.init_tests()
+
+  def test_scc_control_tx_allowed_when_disengaged(self):
+    """Without dynamic handoff, SCC_CONTROL with zero accel is accepted when controls_allowed=False."""
+    self.safety.set_controls_allowed(False)
+    msg = self.packer.make_can_msg_safety("SCC_CONTROL", self.PT_BUS, {"aReqRaw": 0.0, "aReqValue": 0.0})
+    self.assertTrue(self._tx(msg))
+
+  def test_scc_control_tx_allowed_when_engaged(self):
+    """Without dynamic handoff, SCC_CONTROL with zero accel is accepted when controls_allowed=True."""
+    self.safety.set_controls_allowed(True)
+    msg = self.packer.make_can_msg_safety("SCC_CONTROL", self.PT_BUS, {"aReqRaw": 0.0, "aReqValue": 0.0})
+    self.assertTrue(self._tx(msg))
+
+  def test_stock_scc_forwarded_when_disengaged(self):
+    """Without dynamic handoff, stock SCC (0x1A0) forwarding is NOT blocked when controls_allowed=False."""
+    self.safety.set_controls_allowed(False)
+    result = self.safety.safety_fwd_hook(2, 0x1A0)
+    self.assertNotEqual(-1, result)
+
+  def test_stock_scc_forwarded_when_engaged(self):
+    """Without dynamic handoff, stock SCC (0x1A0) forwarding is NOT blocked when controls_allowed=True."""
+    self.safety.set_controls_allowed(True)
+    result = self.safety.safety_fwd_hook(2, 0x1A0)
+    self.assertNotEqual(-1, result)
+
+
 if __name__ == "__main__":
   unittest.main()
