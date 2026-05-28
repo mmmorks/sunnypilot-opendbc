@@ -11,7 +11,7 @@ from collections.abc import Callable
 
 from opendbc.car import structs
 from opendbc.car.can_definitions import CanRecvCallable, CanSendCallable
-from opendbc.car.hyundai.values import HyundaiFlags
+from opendbc.car.hyundai.values import HyundaiFlags, HyundaiSafetyFlags
 from opendbc.car.subaru.values import SubaruFlags
 from opendbc.car.toyota.values import ToyotaSafetyFlags
 from opendbc.sunnypilot.car.hyundai.enable_radar_tracks import enable_radar_tracks as hyundai_enable_radar_tracks
@@ -88,6 +88,7 @@ def setup_interfaces(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
   _initialize_radar_tracks(CP, CP_SP, can_recv, can_send)
   _initialize_stop_and_go(CP, CP_SP, params_dict)
   _initialize_toyota(CP, CP_SP, params_dict)
+  _initialize_dynamic_radar_handoff(CP, params_dict)
 
 
 def _initialize_custom_longitudinal_tuning(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
@@ -146,3 +147,28 @@ def _initialize_toyota(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params
 
     if toyota_stop_and_go_hack and CP.openpilotLongitudinalControl:
       CP_SP.flags |= ToyotaFlagsSP.STOP_AND_GO_HACK.value
+
+
+def _initialize_dynamic_radar_handoff(CP: structs.CarParams, params_dict: dict[str, str]) -> None:
+  """Set CANFD_DYNAMIC_HANDOFF safety bit when all conditions for dynamic radar handoff are met.
+
+  Conditions: HDA II (CANFD_LKA_STEERING) + not CANFD_NO_RADAR_DISABLE + not CANFD_CAMERA_SCC
+              + DynamicRadarHandoffEnabled param + AlphaLongitudinalEnabled param.
+  """
+  if CP.brand != 'hyundai':
+    return
+
+  if not (CP.flags & HyundaiFlags.CANFD_LKA_STEERING):
+    return
+
+  if CP.flags & HyundaiFlags.CANFD_NO_RADAR_DISABLE:
+    return
+
+  if CP.flags & HyundaiFlags.CANFD_CAMERA_SCC:
+    return
+
+  dynamic_handoff_enabled = int(params_dict.get("DynamicRadarHandoffEnabled", 0)) == 1
+  alpha_long_enabled = int(params_dict.get("AlphaLongitudinalEnabled", 0)) == 1
+
+  if dynamic_handoff_enabled and alpha_long_enabled:
+    CP.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF.value
