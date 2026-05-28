@@ -106,6 +106,23 @@ def make_tester_present_msg(addr, bus, subaddr=None, suppress_response=False):
   return CanData(addr, bytes(dat), bus)
 
 
+def make_communication_control_msg(addr, bus, sub_function, communication_type=0x01, suppress_response=False):
+  """UDS service 0x28 CommunicationControl.
+
+  sub_function:
+    0x00 = enableRxAndTx
+    0x01 = enableRxAndDisableTx
+    0x02 = disableRxAndEnableTx
+    0x03 = disableRxAndTx
+
+  communication_type: per ISO 14229-1. 0x01 = normal communication messages, all subnets.
+  """
+  sf = sub_function | (0x80 if suppress_response else 0x00)
+  dat = [0x03, 0x28, sf, communication_type]
+  dat.extend([0x0] * (8 - len(dat)))
+  return CanData(addr, bytes(dat), bus)
+
+
 def get_safety_config(safety_model: structs.CarParams.SafetyModel, safety_param: int | None = None) -> structs.CarParams.SafetyConfig:
   ret = structs.CarParams.SafetyConfig()
   ret.safetyModel = safety_model
