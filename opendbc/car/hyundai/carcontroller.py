@@ -1,11 +1,11 @@
 import numpy as np
 from opendbc.can import CANPacker
-from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs
+from opendbc.car import Bus, DT_CTRL, make_communication_control_msg, make_tester_present_msg, structs
 from opendbc.car.lateral import apply_driver_steer_torque_limits, common_fault_avoidance
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.hyundai import hyundaicanfd, hyundaican
 from opendbc.car.hyundai.hyundaicanfd import CanBus
-from opendbc.car.hyundai.values import HyundaiFlags, Buttons, CarControllerParams, CAR
+from opendbc.car.hyundai.values import HyundaiFlags, HyundaiSafetyFlags, Buttons, CarControllerParams, CAR
 from opendbc.car.interfaces import CarControllerBase
 
 from opendbc.sunnypilot.car.hyundai.escc import EsccCarController
@@ -67,6 +67,9 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self.car_fingerprint = CP.carFingerprint
     self.last_button_frame = 0
 
+    self.dynamic_radar_handoff_enabled = bool(CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF)
+    self.prev_enabled = False
+
   def update(self, CC, CC_SP, CS, now_nanos):
     EsccCarController.update(self, CS)
     LeadDataCarController.update(self, CC_SP)
@@ -100,13 +103,20 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     stopping = actuators.longControlState == LongCtrlState.stopping
     set_speed_in_units = hud_control.setSpeed * (CV.MS_TO_KPH if CS.is_metric else CV.MS_TO_MPH)
 
+    disengage_edge = (self.prev_enabled and not CC.enabled
+                      and self.dynamic_radar_handoff_enabled
+                      and self.CP.openpilotLongitudinalControl
+                      and not (self.CP.flags & HyundaiFlags.CANFD_CAMERA_SCC)
+                      and bool(self.CP.flags & HyundaiFlags.CANFD_LKA_STEERING))
+
     can_sends = []
 
     # *** common hyundai stuff ***
 
     # tester present - w/ no response (keeps relevant ECU disabled)
     if self.frame % 100 == 0 and not ((self.CP.flags & HyundaiFlags.CANFD_CAMERA_SCC) or self.ESCC.enabled) and \
-            self.CP.openpilotLongitudinalControl:
+            self.CP.openpilotLongitudinalControl and \
+            (not self.dynamic_radar_handoff_enabled or CC.enabled):
       # for longitudinal control, either radar or ADAS driving ECU
       addr, bus = 0x7d0, self.CAN.ECAN if self.CP.flags & HyundaiFlags.CANFD else 0
       if self.CP.flags & HyundaiFlags.CANFD_LKA_STEERING.value:
@@ -116,6 +126,10 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
       # for blinkers
       if self.CP.flags & HyundaiFlags.ENABLE_BLINKERS:
         can_sends.append(make_tester_present_msg(0x7b1, self.CAN.ECAN, suppress_response=True))
+
+    # dynamic handoff: on engage->disengage edge, re-enable stock SCC/AEB by restoring ADAS DRV ECU communication
+    if disengage_edge:
+      can_sends.append(make_communication_control_msg(0x730, self.CAN.ECAN, sub_function=0x00, suppress_response=True))
 
     # *** CAN/CAN FD specific ***
     if self.CP.flags & HyundaiFlags.CANFD:
@@ -133,6 +147,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     new_actuators.torqueOutputCan = apply_torque
     new_actuators.accel = self.tuning.actual_accel
 
+    self.prev_enabled = CC.enabled
     self.frame += 1
     return new_actuators, can_sends
 
@@ -207,14 +222,15 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
       can_sends.extend(hyundaicanfd.create_spas_messages(self.packer, self.CAN, CC.leftBlinker, CC.rightBlinker))
 
     if self.CP.openpilotLongitudinalControl:
-      if lka_steering:
-        can_sends.extend(hyundaicanfd.create_adrv_messages(self.packer, self.CAN, self.frame))
-      else:
-        can_sends.extend(hyundaicanfd.create_fca_warning_light(self.packer, self.CAN, self.frame))
-      if self.frame % 2 == 0:
-        can_sends.append(hyundaicanfd.create_acc_control(self.packer, self.CAN, CC.enabled, self.accel_last, accel, stopping, CC.cruiseControl.override,
-                                                         set_speed_in_units, hud_control, self.lead_data, CS.main_cruise_enabled, self.tuning))
-        self.accel_last = accel
+      if not (self.dynamic_radar_handoff_enabled and not CC.enabled):
+        if lka_steering:
+          can_sends.extend(hyundaicanfd.create_adrv_messages(self.packer, self.CAN, self.frame))
+        else:
+          can_sends.extend(hyundaicanfd.create_fca_warning_light(self.packer, self.CAN, self.frame))
+        if self.frame % 2 == 0:
+          can_sends.append(hyundaicanfd.create_acc_control(self.packer, self.CAN, CC.enabled, self.accel_last, accel, stopping, CC.cruiseControl.override,
+                                                           set_speed_in_units, hud_control, self.lead_data, CS.main_cruise_enabled, self.tuning))
+          self.accel_last = accel
     else:
       # button presses
       if (self.frame - self.last_button_frame) * DT_CTRL > 0.25:
