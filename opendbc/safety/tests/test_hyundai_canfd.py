@@ -308,5 +308,48 @@ class TestHyundaiCanfdLFASteeringLongAltButtons(TestHyundaiCanfdLFASteeringLongB
     pass
 
 
+class TestHyundaiCanfdLKASteeringLongDynamicHandoff(TestHyundaiCanfdLKASteeringLongEV):
+  """
+  Verifies that when CANFD_DYNAMIC_HANDOFF is set, SCC_CONTROL and ADRV addresses
+  are rejected when controls_allowed=False, and accepted when controls_allowed=True.
+  Mirrors TestHyundaiCanfdLKASteeringLongEV but with the dynamic handoff flag added.
+  """
+
+  def setUp(self):
+    self.packer = CANPackerSafety("hyundai_canfd_generated")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hyundaiCanfd, HyundaiSafetyFlags.CANFD_LKA_STEERING |
+                                 HyundaiSafetyFlags.LONG | HyundaiSafetyFlags.EV_GAS |
+                                 HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF)
+    self.safety.init_tests()
+
+  def test_dynamic_handoff_scc_control_blocked_without_controls_allowed(self):
+    """SCC_CONTROL must be rejected when controls_allowed=False under dynamic handoff."""
+    self.safety.set_controls_allowed(False)
+    msg = self.packer.make_can_msg_safety("SCC_CONTROL", self.PT_BUS, {"aReqRaw": 0.0, "aReqValue": 0.0})
+    self.assertFalse(self._tx(msg))
+
+  def test_dynamic_handoff_scc_control_allowed_with_controls_allowed(self):
+    """SCC_CONTROL must be accepted when controls_allowed=True under dynamic handoff."""
+    self.safety.set_controls_allowed(True)
+    # Use 0 accel (inactive) so longitudinal_accel_checks passes
+    msg = self.packer.make_can_msg_safety("SCC_CONTROL", self.PT_BUS, {"aReqRaw": 0.0, "aReqValue": 0.0})
+    self.assertTrue(self._tx(msg))
+
+  def test_dynamic_handoff_adrv_0x160_blocked_without_controls_allowed(self):
+    """ADRV address 0x160 must be rejected when controls_allowed=False under dynamic handoff."""
+    from opendbc.safety.tests.libsafety import libsafety_py as _lspy
+    self.safety.set_controls_allowed(False)
+    msg = _lspy.make_CANPacket(0x160, 1, b'\x00' * 16)
+    self.assertFalse(self._tx(msg))
+
+  def test_dynamic_handoff_adrv_0x160_allowed_with_controls_allowed(self):
+    """ADRV address 0x160 must be accepted when controls_allowed=True under dynamic handoff."""
+    from opendbc.safety.tests.libsafety import libsafety_py as _lspy
+    self.safety.set_controls_allowed(True)
+    msg = _lspy.make_CANPacket(0x160, 1, b'\x00' * 16)
+    self.assertTrue(self._tx(msg))
+
+
 if __name__ == "__main__":
   unittest.main()
