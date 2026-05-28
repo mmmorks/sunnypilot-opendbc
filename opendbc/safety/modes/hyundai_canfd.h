@@ -159,6 +159,20 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *msg) {
     .has_steer_req_tolerance = true,
   };
 
+  // Under dynamic handoff, block longitudinal commands when controls are not allowed.
+  // This prevents the ADAS unit from issuing accel/decel while the handoff is in progress.
+  if (hyundai_canfd_dynamic_handoff && !controls_allowed) {
+    if ((msg->addr == 0x1a0U) && hyundai_longitudinal) {
+      return false;
+    }
+    const uint32_t adrv_addrs[] = {0x51U, 0x160U, 0x1EAU, 0x200U, 0x345U, 0x1DAU};
+    for (size_t i = 0U; i < sizeof(adrv_addrs) / sizeof(adrv_addrs[0]); i++) {
+      if (msg->addr == adrv_addrs[i]) {
+        return false;
+      }
+    }
+  }
+
   bool tx = true;
 
   // steering

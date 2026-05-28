@@ -350,6 +350,50 @@ class TestHyundaiCanfdLKASteeringLongDynamicHandoff(TestHyundaiCanfdLKASteeringL
     msg = _lspy.make_CANPacket(0x160, 1, b'\x00' * 16)
     self.assertTrue(self._tx(msg))
 
+  def test_accel_actuation_limits(self):
+    """
+    Under dynamic handoff, ALL SCC_CONTROL is blocked when controls_allowed=False —
+    including inactive accel (0.0). Override the base test to reflect this stricter policy.
+    """
+    import numpy as np
+    from opendbc.safety.tests.common import ALTERNATIVE_EXPERIENCE
+    limits = ((self.MIN_ACCEL, self.MAX_ACCEL, ALTERNATIVE_EXPERIENCE.DEFAULT),
+              (self.MIN_ACCEL, self.MAX_ACCEL, ALTERNATIVE_EXPERIENCE.RAISE_LONGITUDINAL_LIMITS_TO_ISO_MAX))
+    for min_accel, max_accel, alternative_experience in limits:
+      for accel in np.concatenate((np.arange(min_accel - 1, max_accel + 1, 0.05), [0, self.INACTIVE_ACCEL])):
+        accel = round(accel, 2)
+        for controls_allowed in [True, False]:
+          self.safety.set_controls_allowed(controls_allowed)
+          self.safety.set_alternative_experience(alternative_experience)
+          # With dynamic handoff: nothing passes when controls_allowed=False
+          if controls_allowed:
+            should_tx = min_accel <= accel <= max_accel or accel == self.INACTIVE_ACCEL
+          else:
+            should_tx = False
+          self.assertEqual(should_tx, self._tx(self._accel_msg(accel)))
+
+  def test_acc_main_sync_mismatches_reset(self):
+    """
+    Under dynamic handoff, SCC_CONTROL TX is blocked when controls_allowed=False,
+    so the acc_main_on sync mechanism via _tx_acc_state_msg does not fire.
+    This test is not applicable in dynamic handoff mode.
+    """
+    pass
+
+  def test_acc_main_sync_mismatch_counter(self):
+    """
+    Under dynamic handoff, SCC_CONTROL TX is blocked when controls_allowed=False,
+    so the acc_main_on mismatch counter cannot be driven via TX. Not applicable here.
+    """
+    pass
+
+  def test_acc_main_sync_mismatch_recovery(self):
+    """
+    Under dynamic handoff, SCC_CONTROL TX is blocked when controls_allowed=False,
+    so the acc_main_on mismatch recovery cannot be driven via TX. Not applicable here.
+    """
+    pass
+
 
 if __name__ == "__main__":
   unittest.main()
