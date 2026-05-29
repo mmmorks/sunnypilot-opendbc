@@ -386,74 +386,104 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     assert CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF
     return CarController({"pt": "hyundai_canfd_generated", "cam": "hyundai_canfd_generated"}, CP, CP_SP)
 
+  @staticmethod
+  def _step(expected, nrc_service):
+    return {'msg': None, 'expected': expected, 'nrc_service': nrc_service, 'sent_frame': None, 'deadline': None}
+
   def _engage_edge(self, cc):
-    """Manually queue the engage-edge watchdog entries the carcontroller would queue on a real edge."""
-    deadline = cc.frame + cc.HANDOFF_RESPONSE_DEADLINE_FRAMES
-    cc.handoff_pending_engage = [(deadline, 0x50), (deadline, 0x68)]
+    """Set up the engage-edge sequential watchdog steps the carcontroller would build on a real edge."""
+    cc._handoff_seq = [self._step(0x50, 0x10), self._step(0x68, 0x28)]  # extendedSession, then disableRxAndTx
+    cc._handoff_seq_kind = 1
 
   def _disengage_edge(self, cc):
-    deadline = cc.frame + cc.HANDOFF_RESPONSE_DEADLINE_FRAMES
-    cc.handoff_pending_disengage = [(deadline, 0x68), (deadline, 0x50)]
+    cc._handoff_seq = [self._step(0x68, 0x28), self._step(0x50, 0x10)]  # enableRxAndTx, then defaultSession
+    cc._handoff_seq_kind = 2
+
+  @staticmethod
+  def _tick(cc, cs):
+    cc._tick_handoff_watchdog(cs, [])
 
   def test_engage_positive_acks_clear_pending_no_fault(self):
     cc = self._build_controller()
     cs = _FakeCarStateForHandoff()
     self._engage_edge(cc)
-    cs.post_response(0x50, 0x03);    cc._tick_handoff_watchdog(cs); cc.frame += 1
-    cs.post_response(0x68, 0x03, 0x01); cc._tick_handoff_watchdog(cs); cc.frame += 1
-    self.assertEqual(cc.handoff_pending_engage, [])
+    self._tick(cc, cs); cc.frame += 1                          # sends step 0 (extendedSession)
+    cs.post_response(0x50, 0x03); self._tick(cc, cs); cc.frame += 1   # ack step 0 → advance
+    self._tick(cc, cs); cc.frame += 1                          # sends step 1 (disableRxAndTx)
+    cs.post_response(0x68, 0x03, 0x01); self._tick(cc, cs); cc.frame += 1   # ack step 1 → done
+    self.assertEqual(cc._handoff_seq, [])
     self.assertEqual(cc.handoff_fault, 0)
+
+  def test_requests_sent_one_at_a_time(self):
+    # Core anti-coalescing property: only one UDS request is ever outstanding, so the latest-frame-only
+    # 0x738 parser cannot drop an ack/NRC.
+    cc = self._build_controller()
+    cs = _FakeCarStateForHandoff()
+    self._engage_edge(cc)
+    s1 = []; cc._tick_handoff_watchdog(cs, s1)                 # sends step 0 only
+    self.assertEqual(len(s1), 1)
+    cs.post_response(0x50, 0x03)
+    s2 = []; cc._tick_handoff_watchdog(cs, s2)                 # acks step 0; does NOT send step 1 same tick
+    self.assertEqual(len(s2), 0)
+    s3 = []; cc._tick_handoff_watchdog(cs, s3)                 # now sends step 1
+    self.assertEqual(len(s3), 1)
 
   def test_engage_nrc_on_session_control_sets_engage_fault(self):
     cc = self._build_controller()
     cs = _FakeCarStateForHandoff()
     self._engage_edge(cc)
+    self._tick(cc, cs)                                         # send step 0
     # 0x7F 0x10 <code>: ECU rejected the SessionControl request.
     cs.post_response(0x7F, 0x10, 0x22)
-    cc._tick_handoff_watchdog(cs)
+    self._tick(cc, cs)
     self.assertEqual(cc.handoff_fault, 1)
 
   def test_engage_timeout_sets_engage_fault(self):
     cc = self._build_controller()
     cs = _FakeCarStateForHandoff()
     self._engage_edge(cc)
+    self._tick(cc, cs)                                         # send step 0, start deadline
     # No response, advance past the deadline.
     cc.frame += cc.HANDOFF_RESPONSE_DEADLINE_FRAMES + 1
-    cc._tick_handoff_watchdog(cs)
+    self._tick(cc, cs)
     self.assertEqual(cc.handoff_fault, 1)
 
   def test_disengage_nrc_sets_disengage_fault(self):
     cc = self._build_controller()
     cs = _FakeCarStateForHandoff()
     self._disengage_edge(cc)
+    self._tick(cc, cs)                                         # send step 0
     cs.post_response(0x7F, 0x28, 0x22)
-    cc._tick_handoff_watchdog(cs)
+    self._tick(cc, cs)
     self.assertEqual(cc.handoff_fault, 2)
 
   def test_fault_latches_then_clears(self):
     cc = self._build_controller()
     cs = _FakeCarStateForHandoff()
     self._disengage_edge(cc)
+    self._tick(cc, cs)                                         # send step 0
     cs.post_response(0x7F, 0x28, 0x22)
-    cc._tick_handoff_watchdog(cs)
+    self._tick(cc, cs)
     self.assertEqual(cc.handoff_fault, 2)
     # Fault must persist for HANDOFF_FAULT_LATCH_FRAMES so selfdrived has time to observe it.
     cc.frame += cc.HANDOFF_FAULT_LATCH_FRAMES - 1
-    cc._tick_handoff_watchdog(cs)
+    self._tick(cc, cs)
     self.assertEqual(cc.handoff_fault, 2)
     cc.frame += 2
-    cc._tick_handoff_watchdog(cs)
+    self._tick(cc, cs)
     self.assertEqual(cc.handoff_fault, 0)
 
   def test_engage_fault_outranks_disengage_fault(self):
     cc = self._build_controller()
     cs = _FakeCarStateForHandoff()
     self._disengage_edge(cc)
+    self._tick(cc, cs)                                         # send disengage step 0
     cs.post_response(0x7F, 0x28, 0x22)
-    cc._tick_handoff_watchdog(cs)
+    self._tick(cc, cs)
     self.assertEqual(cc.handoff_fault, 2)
-    # Now an engage edge faults too — fault must escalate to 1 (engage), not stay at 2.
+    # Now an engage edge supersedes and faults too — fault must escalate to 1 (engage), not stay at 2.
     self._engage_edge(cc)
+    self._tick(cc, cs)                                         # send engage step 0
     cs.post_response(0x7F, 0x10, 0x22)
-    cc._tick_handoff_watchdog(cs)
+    self._tick(cc, cs)
     self.assertEqual(cc.handoff_fault, 1)

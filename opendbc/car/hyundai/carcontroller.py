@@ -71,18 +71,22 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self.dynamic_radar_handoff_enabled = bool(CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF)
     self.prev_enabled = False
 
-    # Dynamic radar handoff response watchdog. Each entry is (deadline_frame, expected_positive_byte1, label).
-    # On edge fire the watchdog queues the expected ack(s); each tick we check CS.adas_drv_uds_response_* for
-    # a positive ack (UDS_BYTE_1 == request_id + 0x40) or NRC (UDS_BYTE_1 == 0x7F with UDS_BYTE_2 == request_id).
-    # A timed-out, missing, or NRC'd entry sets self.handoff_fault, which the CarState bridge surfaces to
+    # Dynamic radar handoff response watchdog.
+    # On an engage/disengage edge we build a SEQUENTIAL list of UDS steps. Only one request is ever outstanding
+    # at a time: the watchdog sends step N, waits for its specific ack on 0x738, then sends step N+1. This is
+    # required because the 0x738 parser (carstate) only retains the LATEST frame per 100Hz cycle — firing both
+    # requests in one frame lets the two responses coalesce into one cycle, silently dropping an ack (false
+    # timeout) or an NRC (false success). Serializing guarantees at most one response per cycle.
+    # Each step is a dict: {'msg', 'expected' (positive ack byte1), 'nrc_service' (orig service id), 'sent_frame', 'deadline'}.
+    # A timed-out or NRC'd step sets self.handoff_fault, which the CarState bridge surfaces to
     # CarStateSP.adasDrvHandoffFault and selfdrived turns into an EventName event.
     # 0=none, 1=engageFailed (IMMEDIATE_DISABLE), 2=disengageFailed (warning only).
     self.handoff_fault: int = 0
     self.handoff_fault_clear_frame: int = 0
-    self.handoff_pending_engage: list[tuple[int, int]] = []     # (deadline_frame, expected_byte1)
-    self.handoff_pending_disengage: list[tuple[int, int]] = []
+    self._handoff_seq: list[dict] = []      # remaining sequential UDS steps for the active edge
+    self._handoff_seq_kind: int = 0         # fault type to latch if the active sequence fails (1=engage, 2=disengage)
     self._handoff_last_response_seen_count: int = 0
-    # Window after edge in which we accept the ECU's ack. 50 frames @ 100Hz = 500ms; UDS S6/S7 typically <50ms.
+    # Window in which we accept each step's ack. 50 frames @ 100Hz = 500ms; UDS S6/S7 typically <50ms.
     self.HANDOFF_RESPONSE_DEADLINE_FRAMES: int = 50
     # Latch fault for 5s (500 frames) so selfdrived has time to observe and post the event.
     self.HANDOFF_FAULT_LATCH_FRAMES: int = 500
@@ -147,30 +151,35 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
 
     # dynamic handoff: on engage->disengage edge, re-enable stock SCC/AEB by restoring ADAS DRV ECU communication.
     # 0x28 0x00 re-enables Rx/Tx in the current (extended) session; 0x10 0x01 drops back to defaultSession,
-    # which on Hyundai also resets any residual CommunicationControl state. Either frame alone restores comm;
-    # sending both gives a redundant fast-recovery path (no 5s S3 wait). Responses on 0x738 are NOT suppressed
-    # so positive acks ("50 01", "68 00") and NRCs ("7F 10 <code>", "7F 28 <code>") land in route/cabana logs.
+    # which on Hyundai also resets any residual CommunicationControl state. We send them sequentially (comm
+    # control first, then session) so each response is observed on its own cycle. Responses on 0x738 are NOT
+    # suppressed so positive acks ("68 00", "50 01") and NRCs ("7F 28 <code>", "7F 10 <code>") land in logs.
     if disengage_edge:
-      can_sends.append(make_communication_control_msg(0x730, self.CAN.ECAN, sub_function=0x00, suppress_response=False))
-      can_sends.append(make_diagnostic_session_control_msg(0x730, self.CAN.ECAN, sub_function=0x01, suppress_response=False))
-      # Watchdog: expect positive responses 0x68 (CommunicationControl ack) and 0x50 (SessionControl ack).
-      deadline = self.frame + self.HANDOFF_RESPONSE_DEADLINE_FRAMES
-      self.handoff_pending_disengage = [(deadline, 0x68), (deadline, 0x50)]
+      self._handoff_seq = [
+        {'msg': make_communication_control_msg(0x730, self.CAN.ECAN, sub_function=0x00, suppress_response=False),
+         'expected': 0x68, 'nrc_service': 0x28, 'sent_frame': None, 'deadline': None},
+        {'msg': make_diagnostic_session_control_msg(0x730, self.CAN.ECAN, sub_function=0x01, suppress_response=False),
+         'expected': 0x50, 'nrc_service': 0x10, 'sent_frame': None, 'deadline': None},
+      ]
+      self._handoff_seq_kind = 2
 
     # dynamic handoff: on disengage->engage edge, re-silence the ADAS DRV ECU. Boot disable was skipped under
     # dynamic handoff so the ECU is in default session here; the 1Hz tester-present that resumes this frame
-    # keeps the extended session alive (ECU S3 timer ~5s). Responses on 0x738 not suppressed (same rationale).
+    # keeps the extended session alive (ECU S3 timer ~5s). extendedSession is established first, then
+    # disableRxAndTx (which panda only accepts while controls_allowed) — sequencing also lets controls_allowed
+    # settle before the silencing frame is sent. A new edge supersedes any in-flight sequence.
     if engage_edge:
-      can_sends.append(make_diagnostic_session_control_msg(0x730, self.CAN.ECAN, sub_function=0x03, suppress_response=False))
-      can_sends.append(make_communication_control_msg(0x730, self.CAN.ECAN, sub_function=0x03, suppress_response=False))
-      deadline = self.frame + self.HANDOFF_RESPONSE_DEADLINE_FRAMES
-      self.handoff_pending_engage = [(deadline, 0x50), (deadline, 0x68)]
-      # Reset the response-seen baseline so we start counting fresh responses for THIS edge.
-      self._handoff_last_response_seen_count = CS.adas_drv_uds_response_count if self.dynamic_radar_handoff_enabled else 0
+      self._handoff_seq = [
+        {'msg': make_diagnostic_session_control_msg(0x730, self.CAN.ECAN, sub_function=0x03, suppress_response=False),
+         'expected': 0x50, 'nrc_service': 0x10, 'sent_frame': None, 'deadline': None},
+        {'msg': make_communication_control_msg(0x730, self.CAN.ECAN, sub_function=0x03, suppress_response=False),
+         'expected': 0x68, 'nrc_service': 0x28, 'sent_frame': None, 'deadline': None},
+      ]
+      self._handoff_seq_kind = 1
 
-    # Watchdog tick: consume any new ADAS DRV UDS response, advance pending queues, latch faults.
+    # Watchdog tick: send the next pending UDS step, consume its response, latch faults on NRC/timeout.
     if self.dynamic_radar_handoff_enabled:
-      self._tick_handoff_watchdog(CS)
+      self._tick_handoff_watchdog(CS, can_sends)
 
     # *** CAN/CAN FD specific ***
     if self.CP.flags & HyundaiFlags.CANFD:
@@ -192,18 +201,19 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self.frame += 1
     return new_actuators, can_sends
 
-  def _tick_handoff_watchdog(self, CS):
+  def _tick_handoff_watchdog(self, CS, can_sends):
     """Advance the dynamic-handoff response watchdog. Called every tick when dynamic handoff is enabled.
 
-    Reads the latest ADAS DRV UDS response from CS (parsed from the 0x738 message). Each pending edge has a
-    queue of (deadline_frame, expected_positive_byte1) tuples. We:
-      - Consume any new response (CS.adas_drv_uds_response_count delta).
-      - If a positive ack matches an entry's expected byte → remove that entry (success).
-      - If an NRC (UDS_BYTE_1 == 0x7F) for the corresponding service is observed → set fault, clear queue.
-      - If the deadline expires with the entry still pending → set fault, clear queue.
+    Drives the active UDS sequence one step at a time (see __init__). Per tick:
+      - Consume any newly-arrived 0x738 response (CS.adas_drv_uds_response_count delta). Because requests are
+        serialized, at most one response is outstanding, so the latest-frame-only parser cannot drop it.
+      - If the current step has not been sent yet, append it to can_sends and start its deadline.
+      - Else, if its positive ack arrived → advance to the next step. If an NRC for its service arrived, or its
+        deadline expired → latch the sequence's fault type and abort the sequence.
     Fault latches for HANDOFF_FAULT_LATCH_FRAMES so selfdrived has time to observe it.
     """
-    # Consume newly-arrived response (if any).
+    # Consume newly-arrived response (if any). 0x738 frames only appear as responses to our (non-suppressed)
+    # handoff requests, so a fresh delta here is unambiguously the ack/NRC for the outstanding step.
     response_byte1 = response_byte2 = None
     response_is_nrc = False
     if CS.adas_drv_uds_response_count != self._handoff_last_response_seen_count:
@@ -212,41 +222,33 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
       response_byte2 = CS.adas_drv_uds_response_byte2
       response_is_nrc = response_byte1 == 0x7F
 
-    def advance(queue: list[tuple[int, int]]) -> tuple[list[tuple[int, int]], bool]:
-      """Returns (new_queue, fault_observed_this_tick)."""
-      if not queue:
-        return queue, False
-      fault = False
-      new_queue: list[tuple[int, int]] = []
-      for deadline, expected_b1 in queue:
-        # 0x50 ack of 0x10 request → expected_b1==0x50; NRC byte2==0x10. 0x68 ack of 0x28 → byte2==0x28.
-        nrc_service_for_expected = 0x10 if expected_b1 == 0x50 else 0x28
-        matched_positive = response_byte1 == expected_b1
-        matched_nrc = response_is_nrc and response_byte2 == nrc_service_for_expected
+    if self._handoff_seq:
+      step = self._handoff_seq[0]
+      if step['sent_frame'] is None:
+        # Send this step now and start its response window. Don't evaluate a response on the same tick.
+        can_sends.append(step['msg'])
+        step['sent_frame'] = self.frame
+        step['deadline'] = self.frame + self.HANDOFF_RESPONSE_DEADLINE_FRAMES
+      else:
+        matched_positive = response_byte1 == step['expected']
+        matched_nrc = response_is_nrc and response_byte2 == step['nrc_service']
         if matched_positive:
-          continue  # success, drop entry
-        if matched_nrc:
-          fault = True
-          continue  # drop entry, fault recorded
-        if self.frame > deadline:
-          fault = True
-          continue  # timeout, drop entry
-        new_queue.append((deadline, expected_b1))
-      return new_queue, fault
-
-    self.handoff_pending_engage, engage_fault = advance(self.handoff_pending_engage)
-    self.handoff_pending_disengage, disengage_fault = advance(self.handoff_pending_disengage)
-
-    if engage_fault and self.handoff_fault != 1:
-      self.handoff_fault = 1
-      self.handoff_fault_clear_frame = self.frame + self.HANDOFF_FAULT_LATCH_FRAMES
-    elif disengage_fault and self.handoff_fault not in (1, 2):
-      # Engage fault takes priority — if engage already faulted, don't downgrade.
-      self.handoff_fault = 2
-      self.handoff_fault_clear_frame = self.frame + self.HANDOFF_FAULT_LATCH_FRAMES
+          self._handoff_seq.pop(0)  # success → next step sends on the following tick
+        elif matched_nrc or self.frame > step['deadline']:
+          self._handoff_seq = []
+          self._latch_handoff_fault(self._handoff_seq_kind)
 
     if self.handoff_fault and self.frame >= self.handoff_fault_clear_frame:
       self.handoff_fault = 0
+
+  def _latch_handoff_fault(self, kind: int) -> None:
+    # Engage fault (1) outranks disengage fault (2); never downgrade an already-latched engage fault.
+    if kind == 1 and self.handoff_fault != 1:
+      self.handoff_fault = 1
+      self.handoff_fault_clear_frame = self.frame + self.HANDOFF_FAULT_LATCH_FRAMES
+    elif kind == 2 and self.handoff_fault not in (1, 2):
+      self.handoff_fault = 2
+      self.handoff_fault_clear_frame = self.frame + self.HANDOFF_FAULT_LATCH_FRAMES
 
   def create_can_msgs(self, apply_steer_req, apply_torque, torque_fault, set_speed_in_units, accel, stopping, hud_control, actuators, CS, CC):
     can_sends = []

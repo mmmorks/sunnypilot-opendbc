@@ -324,6 +324,11 @@ class TestHyundaiCanfdLKASteeringLongDynamicHandoff(TestHyundaiCanfdLKASteeringL
   # forwards longitudinal addresses to let stock SCC pass through. Only LKAS outputs are blocked.
   FWD_BLACKLISTED_ADDRS = {2: [0x50, 0x2a4]}
 
+  # Under dynamic handoff the ADAS DRV ECU is intentionally kept alive and broadcasts stock SCC_CONTROL
+  # (0x1a0) on E-CAN whenever disengaged, so its presence on the bus is NOT a relay-malfunction signal here
+  # (the handoff TX list drops check_relay on 0x1a0). The lateral/camera relay addrs still apply.
+  RELAY_MALFUNCTION_ADDRS = {0: (0x50, 0x2a4)}
+
   def setUp(self):
     self.packer = CANPackerSafety("hyundai_canfd_generated")
     self.safety = libsafety_py.libsafety
@@ -331,6 +336,16 @@ class TestHyundaiCanfdLKASteeringLongDynamicHandoff(TestHyundaiCanfdLKASteeringL
                                  HyundaiSafetyFlags.LONG | HyundaiSafetyFlags.EV_GAS |
                                  HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF)
     self.safety.init_tests()
+
+  def test_disabled_ecu_alive(self):
+    """Under dynamic handoff the ADAS DRV ECU is intentionally NOT knocked out — it stays alive and broadcasts
+    stock SCC_CONTROL (0x1a0) on E-CAN whenever disengaged. That must NOT trigger relay malfunction, otherwise
+    panda blocks all tx and all forwarding (including the stock SCC/AEB the handoff is meant to preserve)."""
+    addr, bus = self.DISABLED_ECU_ACTUATION_MSG
+    self.assertFalse(self.safety.get_relay_malfunction())
+    for _ in range(10):
+      self._rx(common.make_msg(bus, addr, 8))
+    self.assertFalse(self.safety.get_relay_malfunction())
 
   def test_dynamic_handoff_scc_control_blocked_without_controls_allowed(self):
     """SCC_CONTROL must be rejected when controls_allowed=False under dynamic handoff."""
@@ -396,23 +411,32 @@ class TestHyundaiCanfdLKASteeringLongDynamicHandoff(TestHyundaiCanfdLKASteeringL
     self.assertTrue(self._tx(msg))
 
   def test_uds_730_handoff_frames_allowed(self):
-    """Under dynamic handoff, 0x730 accepts the four non-suppress UDS frames the carcontroller emits.
+    """Under dynamic handoff, 0x730 accepts the non-suppress UDS frames the carcontroller emits.
 
-    Suppress-response is deliberately NOT set on edge frames so positive acks ("\x02\x50\x03..." etc.) and NRCs
-    ("\x03\x7F\x10..." / "\x03\x7F\x28...") land on 0x738 and are observable in route/cabana logs.
+    The restore/session frames are allowed in any state; the SILENCING frame (0x28 disableRxAndTx) is only
+    allowed while controls_allowed so a stray edge cannot disable the stock SCC/AEB when openpilot is not the
+    longitudinal authority. Suppress-response is deliberately NOT set so positive acks and NRCs land on 0x738.
     """
     from opendbc.safety.tests.libsafety import libsafety_py as _lspy
-    handoff_frames = (
-      b"\x02\x10\x03\x00\x00\x00\x00\x00",  # 0x10 extendedDiagnosticSession (engage step 1)
-      b"\x03\x28\x03\x01\x00\x00\x00\x00",  # 0x28 disableRxAndTx            (engage step 2)
-      b"\x03\x28\x00\x01\x00\x00\x00\x00",  # 0x28 enableRxAndTx             (disengage step 1)
-      b"\x02\x10\x01\x00\x00\x00\x00\x00",  # 0x10 defaultSession            (disengage step 2)
+    always_allowed = (
+      b"\x02\x10\x03\x00\x00\x00\x00\x00",  # 0x10 extendedDiagnosticSession (engage step 1) — does not silence
+      b"\x03\x28\x00\x01\x00\x00\x00\x00",  # 0x28 enableRxAndTx             (disengage step 1) — restores stock
+      b"\x02\x10\x01\x00\x00\x00\x00\x00",  # 0x10 defaultSession            (disengage step 2) — restores stock
     )
+    silencing_frame = b"\x03\x28\x03\x01\x00\x00\x00\x00"  # 0x28 disableRxAndTx (engage step 2) — engaged only
     for controls_allowed in (False, True):
       self.safety.set_controls_allowed(controls_allowed)
-      for payload in handoff_frames:
+      for payload in always_allowed:
         msg = _lspy.make_CANPacket(0x730, 1, payload)
         self.assertTrue(self._tx(msg), f"{payload.hex()} must pass with controls_allowed={controls_allowed}")
+
+    # disableRxAndTx: rejected when disengaged, accepted when engaged.
+    self.safety.set_controls_allowed(False)
+    self.assertFalse(self._tx(_lspy.make_CANPacket(0x730, 1, silencing_frame)),
+                     "disableRxAndTx must be rejected when controls_allowed=False")
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self._tx(_lspy.make_CANPacket(0x730, 1, silencing_frame)),
+                    "disableRxAndTx must be accepted when controls_allowed=True")
 
   def test_uds_730_other_payloads_blocked(self):
     """Under dynamic handoff, 0x730 still rejects payloads not on the exact allowlist (including the

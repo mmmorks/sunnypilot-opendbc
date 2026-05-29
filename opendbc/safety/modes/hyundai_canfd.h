@@ -211,12 +211,17 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *msg) {
   //   - defaultSession                 ("\x02\x10\x01\x00\x00\x00\x00\x00") — disengage deinit step 2
   if (((msg->addr == 0x730U) && hyundai_canfd_lka_steering) || ((msg->addr == 0x7D0U) && !hyundai_camera_scc)) {
     bool is_tester_present = (GET_BYTES(msg, 0, 4) == 0x00803E02U) && (GET_BYTES(msg, 4, 4) == 0x0U);
+    // The re-enable/session frames only ever RESTORE the stock ECU, so they are safe to allow in any state.
+    // disableRxAndTx (0x28 0x03) SILENCES the stock SCC/AEB and must only be permitted while openpilot is the
+    // longitudinal authority (controls_allowed) — otherwise a stray edge could leave the car with no active
+    // longitudinal safety. The carcontroller sequences extendedSession before it, so controls_allowed has
+    // settled by the time the silencing frame is emitted.
     bool is_handoff_frame = hyundai_canfd_dynamic_handoff && (msg->addr == 0x730U) &&
                             (GET_BYTES(msg, 4, 4) == 0x0U) &&
-                            ((GET_BYTES(msg, 0, 4) == 0x01002803U) ||  // 0x28 enableRxAndTx       (disengage 1)
-                             (GET_BYTES(msg, 0, 4) == 0x00011002U) ||  // 0x10 defaultSession      (disengage 2)
-                             (GET_BYTES(msg, 0, 4) == 0x01032803U) ||  // 0x28 disableRxAndTx      (engage 2)
-                             (GET_BYTES(msg, 0, 4) == 0x00031002U));   // 0x10 extendedSession     (engage 1)
+                            ((GET_BYTES(msg, 0, 4) == 0x01002803U) ||  // 0x28 enableRxAndTx       (disengage 1) — restores stock
+                             (GET_BYTES(msg, 0, 4) == 0x00011002U) ||  // 0x10 defaultSession      (disengage 2) — restores stock
+                             (GET_BYTES(msg, 0, 4) == 0x00031002U) ||  // 0x10 extendedSession     (engage 1)   — does not silence
+                             ((GET_BYTES(msg, 0, 4) == 0x01032803U) && controls_allowed));  // 0x28 disableRxAndTx (engage 2) — silences: engaged only
     if (!is_tester_present && !is_handoff_frame) {
       tx = false;
     }
@@ -302,6 +307,25 @@ static safety_config hyundai_canfd_init(uint16_t param) {
     {0x1DA, 1, 32, .check_relay = false, .disable_static_blocking = true},  // ADRV_0x1da
   };
 
+  // Dynamic radar handoff variant: the ADAS DRV ECU is intentionally NOT knocked out (boot disable skipped),
+  // so it keeps broadcasting stock SCC_CONTROL (0x1A0) on E-CAN whenever openpilot is disengaged. That is no
+  // longer a relay-malfunction signal, so SCC_CONTROL must NOT have check_relay here — otherwise the rx relay
+  // detector (safety.h, which ignores disable_static_blocking) latches relay_malfunction within ~1s and blocks
+  // ALL tx and ALL forwarding, including the stock SCC/AEB the handoff is meant to preserve. Forwarding of
+  // 0x1A0 is gated dynamically by hyundai_canfd_fwd_hook on controls_allowed instead.
+  static const CanMsg HYUNDAI_CANFD_LKA_STEERING_LONG_HANDOFF_TX_MSGS[] = {
+    HYUNDAI_CANFD_LKA_STEERING_COMMON_TX_MSGS(0, 1)
+    HYUNDAI_CANFD_LFA_STEERING_COMMON_TX_MSGS(1)
+    {0x1A0, 1, 32, .check_relay = false, .disable_static_blocking = true},  // SCC_CONTROL (dynamic handoff: stock ECU alive → no relay detection; fwd hook gates)
+    {0x51,  0, 32, .check_relay = false, .disable_static_blocking = true},  // ADRV_0x51
+    {0x730, 1,  8, .check_relay = false},  // tester present / handoff UDS for ADAS ECU
+    {0x160, 1, 16, .check_relay = false, .disable_static_blocking = true},  // ADRV_0x160
+    {0x1EA, 1, 32, .check_relay = false, .disable_static_blocking = true},  // ADRV_0x1ea
+    {0x200, 1,  8, .check_relay = false, .disable_static_blocking = true},  // ADRV_0x200
+    {0x345, 1,  8, .check_relay = false, .disable_static_blocking = true},  // ADRV_0x345
+    {0x1DA, 1, 32, .check_relay = false, .disable_static_blocking = true},  // ADRV_0x1da
+  };
+
   static const CanMsg HYUNDAI_CANFD_LFA_STEERING_TX_MSGS[] = {
     HYUNDAI_CANFD_CRUISE_BUTTON_TX_MSGS(2)
     HYUNDAI_CANFD_LFA_STEERING_COMMON_TX_MSGS(0)
@@ -338,7 +362,11 @@ static safety_config hyundai_canfd_init(uint16_t param) {
         HYUNDAI_CANFD_STD_BUTTONS_RX_CHECKS(1)
       };
 
-      ret = BUILD_SAFETY_CFG(hyundai_canfd_lka_steering_long_rx_checks, HYUNDAI_CANFD_LKA_STEERING_LONG_TX_MSGS);
+      if (hyundai_canfd_dynamic_handoff) {
+        ret = BUILD_SAFETY_CFG(hyundai_canfd_lka_steering_long_rx_checks, HYUNDAI_CANFD_LKA_STEERING_LONG_HANDOFF_TX_MSGS);
+      } else {
+        ret = BUILD_SAFETY_CFG(hyundai_canfd_lka_steering_long_rx_checks, HYUNDAI_CANFD_LKA_STEERING_LONG_TX_MSGS);
+      }
 
     } else {
       // Longitudinal checks for LFA steering
