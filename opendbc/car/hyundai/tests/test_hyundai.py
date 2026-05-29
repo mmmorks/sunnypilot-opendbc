@@ -302,6 +302,16 @@ class TestHyundaiCarParamsDynamicHandoff(unittest.TestCase):
     assert CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF, \
       "CANFD_DYNAMIC_HANDOFF bit must be set when all conditions are met"
 
+  def test_no_openpilot_long_bit_clear(self):
+    """AlphaLongitudinalEnabled param set but openpilot longitudinal not actually active (get_params
+    alpha_long=False) -> bit must be clear. Otherwise the engage edge would silence the stock ADAS DRV ECU
+    while openpilot is not the longitudinal authority, leaving the car with no longitudinal safety."""
+    fingerprint = self._build_fingerprint_with_lka()
+    CP = self._get_params_and_apply(fingerprint, self.ADAS_FW, False, self._all_params())
+    assert not CP.openpilotLongitudinalControl, "Precondition: openpilot long must be inactive"
+    assert not (CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF), \
+      "CANFD_DYNAMIC_HANDOFF bit must be clear when openpilotLongitudinalControl is False"
+
   def test_dynamic_radar_handoff_param_false_bit_clear(self):
     """DynamicRadarHandoffEnabled=0 -> bit clear."""
     fingerprint = self._build_fingerprint_with_lka()
@@ -387,8 +397,9 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     return CarController({"pt": "hyundai_canfd_generated", "cam": "hyundai_canfd_generated"}, CP, CP_SP)
 
   @staticmethod
-  def _step(expected, nrc_service):
-    return {'msg': None, 'expected': expected, 'nrc_service': nrc_service, 'sent_frame': None, 'deadline': None}
+  def _step(expected, nrc_service, retries=0):
+    return {'msg': None, 'expected': expected, 'nrc_service': nrc_service, 'sent_frame': None,
+            'deadline': None, 'retries_left': retries}
 
   def _engage_edge(self, cc):
     """Set up the engage-edge sequential watchdog steps the carcontroller would build on a real edge."""
@@ -496,3 +507,66 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     cs.post_response(0x7F, 0x10, 0x22)
     self._tick(cc, cs)
     self.assertEqual(cc.handoff_fault, 1)
+
+  def test_make_handoff_step_sets_retries(self):
+    # Steps the carcontroller builds on a real edge must carry a positive retry budget so a single dropped
+    # request (notably panda rejecting the silencing frame until controls_allowed settles) does not fault.
+    cc = self._build_controller()
+    self.assertGreater(cc.HANDOFF_STEP_MAX_RETRIES, 0)
+    step = cc._make_handoff_step(None, 0x50, 0x10)
+    self.assertEqual(step['retries_left'], cc.HANDOFF_STEP_MAX_RETRIES)
+
+  def test_timeout_retries_then_succeeds(self):
+    # A timed-out step must be re-sent (re-armed) rather than immediately latching a fault. This covers the
+    # engage silencing frame being dropped by panda until controls_allowed has settled.
+    cc = self._build_controller()
+    cs = _FakeCarStateForHandoff()
+    cc._handoff_seq = [self._step(0x50, 0x10, retries=2)]
+    cc._handoff_seq_kind = 1
+    self._tick(cc, cs)                                         # send attempt 1
+    cc.frame += cc.HANDOFF_RESPONSE_DEADLINE_FRAMES + 1
+    self._tick(cc, cs)                                         # attempt 1 times out → retry, no fault
+    self.assertEqual(cc.handoff_fault, 0)
+    self.assertEqual(len(cc._handoff_seq), 1)                  # step still pending
+    self._tick(cc, cs)                                         # re-send attempt 2
+    cs.post_response(0x50, 0x03)                               # ECU acks this time
+    self._tick(cc, cs)
+    self.assertEqual(cc.handoff_fault, 0)
+    self.assertEqual(cc._handoff_seq, [])                      # advanced past the step
+
+  def test_timeout_exhausts_retries_then_faults(self):
+    cc = self._build_controller()
+    cs = _FakeCarStateForHandoff()
+    cc._handoff_seq = [self._step(0x50, 0x10, retries=2)]      # initial attempt + 2 retries = 3 timeouts to fault
+    cc._handoff_seq_kind = 1
+    for _ in range(3):
+      self.assertEqual(cc.handoff_fault, 0)
+      self._tick(cc, cs)                                       # (re)send
+      cc.frame += cc.HANDOFF_RESPONSE_DEADLINE_FRAMES + 1
+      self._tick(cc, cs)                                       # time out
+    self.assertEqual(cc.handoff_fault, 1)
+
+  def test_nrc_does_not_retry(self):
+    # An NRC is an explicit ECU rejection; retrying won't help, so the fault latches immediately even with
+    # retries still available.
+    cc = self._build_controller()
+    cs = _FakeCarStateForHandoff()
+    cc._handoff_seq = [self._step(0x50, 0x10, retries=3)]
+    cc._handoff_seq_kind = 1
+    self._tick(cc, cs)                                         # send
+    cs.post_response(0x7F, 0x10, 0x22)                         # NRC for SessionControl
+    self._tick(cc, cs)
+    self.assertEqual(cc.handoff_fault, 1)
+    self.assertEqual(cc._handoff_seq, [])
+
+  def test_carstate_declares_cc_backref(self):
+    # CarStateBase must declare CC (default None) so the back-ref is an explicit, type-safe attribute and a
+    # missing wiring reads as None (fail-soft) rather than raising AttributeError.
+    from opendbc.car.hyundai.carstate import CarState
+    fingerprint = gen_empty_fingerprint()
+    fingerprint[CanBus(None, fingerprint).CAM][0x50] = 8
+    adas_fw = [CarParams.CarFw(ecu=CarParams.Ecu.adas, fwVersion=b'test', address=0x0, subAddress=0)]
+    CP = CarInterface.get_params(self.CANDIDATE, fingerprint, adas_fw, True, False, False)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, self.CANDIDATE)
+    cs = CarState(CP, CP_SP)
+    self.assertIsNone(cs.CC)

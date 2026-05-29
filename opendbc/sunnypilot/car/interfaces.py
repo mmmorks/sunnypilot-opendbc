@@ -153,7 +153,7 @@ def _initialize_dynamic_radar_handoff(CP: structs.CarParams, params_dict: dict[s
   """Set CANFD_DYNAMIC_HANDOFF safety bit when all conditions for dynamic radar handoff are met.
 
   Conditions: HDA II (CANFD_LKA_STEERING) + not CANFD_NO_RADAR_DISABLE + not CANFD_CAMERA_SCC
-              + DynamicRadarHandoffEnabled param + AlphaLongitudinalEnabled param.
+              + openpilot longitudinal active + DynamicRadarHandoffEnabled param + AlphaLongitudinalEnabled param.
   """
   if CP.brand != 'hyundai':
     return
@@ -165,6 +165,12 @@ def _initialize_dynamic_radar_handoff(CP: structs.CarParams, params_dict: dict[s
     return
 
   if CP.flags & HyundaiFlags.CANFD_CAMERA_SCC:
+    return
+
+  # The handoff silences the stock ADAS DRV ECU on engage; that is only safe when openpilot is actually the
+  # longitudinal authority. AlphaLongitudinalEnabled is a request — openpilotLongitudinalControl is the
+  # resolved truth — so gate on the latter to avoid silencing stock SCC/AEB with nothing replacing it.
+  if not CP.openpilotLongitudinalControl:
     return
 
   dynamic_handoff_enabled = int(params_dict.get("DynamicRadarHandoffEnabled", 0)) == 1

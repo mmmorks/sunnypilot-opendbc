@@ -88,6 +88,10 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self._handoff_last_response_seen_count: int = 0
     # Window in which we accept each step's ack. 50 frames @ 100Hz = 500ms; UDS S6/S7 typically <50ms.
     self.HANDOFF_RESPONSE_DEADLINE_FRAMES: int = 50
+    # Re-send a step this many times on timeout before latching a fault. Absorbs transient drops — notably
+    # panda rejecting the engage silencing frame (disableRxAndTx) until controls_allowed has settled, and
+    # one-off CAN losses — without escalating straight to IMMEDIATE_DISABLE. NRCs are NOT retried.
+    self.HANDOFF_STEP_MAX_RETRIES: int = 3
     # Latch fault for 5s (500 frames) so selfdrived has time to observe and post the event.
     self.HANDOFF_FAULT_LATCH_FRAMES: int = 500
 
@@ -124,12 +128,12 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     stopping = actuators.longControlState == LongCtrlState.stopping
     set_speed_in_units = hud_control.setSpeed * (CV.MS_TO_KPH if CS.is_metric else CV.MS_TO_MPH)
 
-    disengage_edge = (self.prev_enabled and not CC.enabled
-                      and self.dynamic_radar_handoff_enabled
-                      and self.CP.openpilotLongitudinalControl
-                      and not (self.CP.flags & HyundaiFlags.CANFD_CAMERA_SCC)
-                      and bool(self.CP.flags & HyundaiFlags.CANFD_LKA_STEERING))
-    engage_edge = (not self.prev_enabled and CC.enabled and self.dynamic_radar_handoff_enabled)
+    # dynamic_radar_handoff_enabled is derived from the CANFD_DYNAMIC_HANDOFF safety bit, which
+    # _initialize_dynamic_radar_handoff only sets when every precondition holds (HDA II, radar-disable
+    # capable, not camera-SCC, and openpilotLongitudinalControl). So the bit alone is authoritative here —
+    # the engage and disengage edges gate on the same predicate, symmetrically.
+    disengage_edge = self.prev_enabled and not CC.enabled and self.dynamic_radar_handoff_enabled
+    engage_edge = not self.prev_enabled and CC.enabled and self.dynamic_radar_handoff_enabled
 
     can_sends = []
 
@@ -156,10 +160,10 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     # suppressed so positive acks ("68 00", "50 01") and NRCs ("7F 28 <code>", "7F 10 <code>") land in logs.
     if disengage_edge:
       self._handoff_seq = [
-        {'msg': make_communication_control_msg(0x730, self.CAN.ECAN, sub_function=0x00, suppress_response=False),
-         'expected': 0x68, 'nrc_service': 0x28, 'sent_frame': None, 'deadline': None},
-        {'msg': make_diagnostic_session_control_msg(0x730, self.CAN.ECAN, sub_function=0x01, suppress_response=False),
-         'expected': 0x50, 'nrc_service': 0x10, 'sent_frame': None, 'deadline': None},
+        self._make_handoff_step(make_communication_control_msg(0x730, self.CAN.ECAN, sub_function=0x00, suppress_response=False),
+                                expected=0x68, nrc_service=0x28),
+        self._make_handoff_step(make_diagnostic_session_control_msg(0x730, self.CAN.ECAN, sub_function=0x01, suppress_response=False),
+                                expected=0x50, nrc_service=0x10),
       ]
       self._handoff_seq_kind = 2
 
@@ -170,10 +174,10 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     # settle before the silencing frame is sent. A new edge supersedes any in-flight sequence.
     if engage_edge:
       self._handoff_seq = [
-        {'msg': make_diagnostic_session_control_msg(0x730, self.CAN.ECAN, sub_function=0x03, suppress_response=False),
-         'expected': 0x50, 'nrc_service': 0x10, 'sent_frame': None, 'deadline': None},
-        {'msg': make_communication_control_msg(0x730, self.CAN.ECAN, sub_function=0x03, suppress_response=False),
-         'expected': 0x68, 'nrc_service': 0x28, 'sent_frame': None, 'deadline': None},
+        self._make_handoff_step(make_diagnostic_session_control_msg(0x730, self.CAN.ECAN, sub_function=0x03, suppress_response=False),
+                                expected=0x50, nrc_service=0x10),
+        self._make_handoff_step(make_communication_control_msg(0x730, self.CAN.ECAN, sub_function=0x03, suppress_response=False),
+                                expected=0x68, nrc_service=0x28),
       ]
       self._handoff_seq_kind = 1
 
@@ -200,6 +204,12 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self.prev_enabled = CC.enabled
     self.frame += 1
     return new_actuators, can_sends
+
+  def _make_handoff_step(self, msg, expected, nrc_service):
+    # One sequential UDS step for the handoff watchdog. retries_left lets a timed-out step be re-sent before
+    # it escalates to a latched fault (see HANDOFF_STEP_MAX_RETRIES).
+    return {'msg': msg, 'expected': expected, 'nrc_service': nrc_service,
+            'sent_frame': None, 'deadline': None, 'retries_left': self.HANDOFF_STEP_MAX_RETRIES}
 
   def _tick_handoff_watchdog(self, CS, can_sends):
     """Advance the dynamic-handoff response watchdog. Called every tick when dynamic handoff is enabled.
@@ -234,9 +244,19 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
         matched_nrc = response_is_nrc and response_byte2 == step['nrc_service']
         if matched_positive:
           self._handoff_seq.pop(0)  # success → next step sends on the following tick
-        elif matched_nrc or self.frame > step['deadline']:
+        elif matched_nrc:
+          # Explicit ECU rejection — retrying won't help, latch immediately.
           self._handoff_seq = []
           self._latch_handoff_fault(self._handoff_seq_kind)
+        elif self.frame > step['deadline']:
+          if step['retries_left'] > 0:
+            # Re-arm the step: re-send and restart its response window on the next tick.
+            step['retries_left'] -= 1
+            step['sent_frame'] = None
+            step['deadline'] = None
+          else:
+            self._handoff_seq = []
+            self._latch_handoff_fault(self._handoff_seq_kind)
 
     if self.handoff_fault and self.frame >= self.handoff_fault_clear_frame:
       self.handoff_fault = 0
