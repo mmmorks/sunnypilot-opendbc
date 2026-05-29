@@ -202,9 +202,22 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *msg) {
     }
   }
 
-  // UDS: only tester present ("\x02\x3E\x80\x00\x00\x00\x00\x00") allowed on diagnostics address
+  // UDS: only tester present ("\x02\x3E\x80\x00\x00\x00\x00\x00") allowed on diagnostics address.
+  // Under dynamic handoff, additionally allow four non-suppress-response frames to 0x730 (responses arrive on
+  // 0x738 and are observable in route/cabana logs for both positive acks and NRCs):
+  //   - extendedDiagnosticSession      ("\x02\x10\x03\x00\x00\x00\x00\x00") — engage edge step 1
+  //   - CommunicationControl disableRxAndTx ("\x03\x28\x03\x01\x00\x00\x00\x00") — engage edge step 2
+  //   - CommunicationControl enableRxAndTx  ("\x03\x28\x00\x01\x00\x00\x00\x00") — disengage deinit step 1
+  //   - defaultSession                 ("\x02\x10\x01\x00\x00\x00\x00\x00") — disengage deinit step 2
   if (((msg->addr == 0x730U) && hyundai_canfd_lka_steering) || ((msg->addr == 0x7D0U) && !hyundai_camera_scc)) {
-    if ((GET_BYTES(msg, 0, 4) != 0x00803E02U) || (GET_BYTES(msg, 4, 4) != 0x0U)) {
+    bool is_tester_present = (GET_BYTES(msg, 0, 4) == 0x00803E02U) && (GET_BYTES(msg, 4, 4) == 0x0U);
+    bool is_handoff_frame = hyundai_canfd_dynamic_handoff && (msg->addr == 0x730U) &&
+                            (GET_BYTES(msg, 4, 4) == 0x0U) &&
+                            ((GET_BYTES(msg, 0, 4) == 0x01002803U) ||  // 0x28 enableRxAndTx       (disengage 1)
+                             (GET_BYTES(msg, 0, 4) == 0x00011002U) ||  // 0x10 defaultSession      (disengage 2)
+                             (GET_BYTES(msg, 0, 4) == 0x01032803U) ||  // 0x28 disableRxAndTx      (engage 2)
+                             (GET_BYTES(msg, 0, 4) == 0x00031002U));   // 0x10 extendedSession     (engage 1)
+    if (!is_tester_present && !is_handoff_frame) {
       tx = false;
     }
   }

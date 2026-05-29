@@ -221,6 +221,14 @@ BO_ 702 CAM_0x2be: 32 CAMERA
  SG_ CHECKSUM : 0|16@1+ (1,0) [0|65535] "" XXX
  SG_ COUNTER : 16|8@1+ (1,0) [0|255] "" XXX
 
+BO_ 1848 ADAS_DRV_UDS_RESPONSE: 8 ADRV
+ SG_ ISO_TP_LEN : 0|8@1+ (1,0) [0|255] "" XXX
+ SG_ UDS_BYTE_1 : 8|8@1+ (1,0) [0|255] "" XXX
+ SG_ UDS_BYTE_2 : 16|8@1+ (1,0) [0|255] "" XXX
+ SG_ UDS_BYTE_3 : 24|8@1+ (1,0) [0|255] "" XXX
+
+CM_ BO_ 1848 "UDS response from ADAS DRV ECU (0x738). UDS_BYTE_1 is the service-id reply (positive: request-id + 0x40; negative: 0x7F). UDS_BYTE_2 is subFunction on positive responses or original service-id on NRCs. UDS_BYTE_3 is communicationType on 0x68 / NRC code on 0x7F.";
+
 CM_ BO_ 676 "Contains signals with detailed lane line information. Used by ADAS ECU on HDA 2 vehicles to operate LFA.";
 
 CM_ SG_ 80 HAS_LANE_SAFETY "If 0, hides LKAS 'Lane Safety' menu from vehicle settings";

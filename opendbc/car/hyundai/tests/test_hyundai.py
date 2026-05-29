@@ -352,3 +352,108 @@ class TestHyundaiCarParamsDynamicHandoff(unittest.TestCase):
     assert CP.flags & HyundaiFlags.CANFD_CAMERA_SCC, "Precondition: CANFD_CAMERA_SCC must be set"
     assert not (CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF), \
       "CANFD_DYNAMIC_HANDOFF bit must be clear when CANFD_CAMERA_SCC is set"
+
+
+class _FakeCarStateForHandoff:
+  """Minimal CS stand-in for unit-testing the dynamic-handoff watchdog without spinning up CAN parsers."""
+  def __init__(self):
+    self.adas_drv_uds_response_count = 0
+    self.adas_drv_uds_response_isotp_len = 0
+    self.adas_drv_uds_response_byte1 = 0
+    self.adas_drv_uds_response_byte2 = 0
+    self.adas_drv_uds_response_byte3 = 0
+
+  def post_response(self, byte1: int, byte2: int = 0, byte3: int = 0):
+    self.adas_drv_uds_response_count += 1
+    self.adas_drv_uds_response_byte1 = byte1
+    self.adas_drv_uds_response_byte2 = byte2
+    self.adas_drv_uds_response_byte3 = byte3
+
+
+class TestHyundaiHandoffWatchdog(unittest.TestCase):
+  """Unit tests for the dynamic-handoff response watchdog in CarController."""
+
+  CANDIDATE = CAR.GENESIS_GV70_ELECTRIFIED_1ST_GEN
+
+  def _build_controller(self):
+    from opendbc.car.hyundai.carcontroller import CarController
+    fingerprint = gen_empty_fingerprint()
+    fingerprint[CanBus(None, fingerprint).CAM][0x50] = 8  # CANFD_LKA_STEERING
+    adas_fw = [CarParams.CarFw(ecu=CarParams.Ecu.adas, fwVersion=b'test', address=0x0, subAddress=0)]
+    CP = CarInterface.get_params(self.CANDIDATE, fingerprint, adas_fw, True, False, False)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, self.CANDIDATE)
+    setup_interfaces(CarInterface, CP, CP_SP, [{"DynamicRadarHandoffEnabled": "1"}, {"AlphaLongitudinalEnabled": "1"}])
+    assert CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF
+    return CarController({"pt": "hyundai_canfd_generated", "cam": "hyundai_canfd_generated"}, CP, CP_SP)
+
+  def _engage_edge(self, cc):
+    """Manually queue the engage-edge watchdog entries the carcontroller would queue on a real edge."""
+    deadline = cc.frame + cc.HANDOFF_RESPONSE_DEADLINE_FRAMES
+    cc.handoff_pending_engage = [(deadline, 0x50), (deadline, 0x68)]
+
+  def _disengage_edge(self, cc):
+    deadline = cc.frame + cc.HANDOFF_RESPONSE_DEADLINE_FRAMES
+    cc.handoff_pending_disengage = [(deadline, 0x68), (deadline, 0x50)]
+
+  def test_engage_positive_acks_clear_pending_no_fault(self):
+    cc = self._build_controller()
+    cs = _FakeCarStateForHandoff()
+    self._engage_edge(cc)
+    cs.post_response(0x50, 0x03);    cc._tick_handoff_watchdog(cs); cc.frame += 1
+    cs.post_response(0x68, 0x03, 0x01); cc._tick_handoff_watchdog(cs); cc.frame += 1
+    self.assertEqual(cc.handoff_pending_engage, [])
+    self.assertEqual(cc.handoff_fault, 0)
+
+  def test_engage_nrc_on_session_control_sets_engage_fault(self):
+    cc = self._build_controller()
+    cs = _FakeCarStateForHandoff()
+    self._engage_edge(cc)
+    # 0x7F 0x10 <code>: ECU rejected the SessionControl request.
+    cs.post_response(0x7F, 0x10, 0x22)
+    cc._tick_handoff_watchdog(cs)
+    self.assertEqual(cc.handoff_fault, 1)
+
+  def test_engage_timeout_sets_engage_fault(self):
+    cc = self._build_controller()
+    cs = _FakeCarStateForHandoff()
+    self._engage_edge(cc)
+    # No response, advance past the deadline.
+    cc.frame += cc.HANDOFF_RESPONSE_DEADLINE_FRAMES + 1
+    cc._tick_handoff_watchdog(cs)
+    self.assertEqual(cc.handoff_fault, 1)
+
+  def test_disengage_nrc_sets_disengage_fault(self):
+    cc = self._build_controller()
+    cs = _FakeCarStateForHandoff()
+    self._disengage_edge(cc)
+    cs.post_response(0x7F, 0x28, 0x22)
+    cc._tick_handoff_watchdog(cs)
+    self.assertEqual(cc.handoff_fault, 2)
+
+  def test_fault_latches_then_clears(self):
+    cc = self._build_controller()
+    cs = _FakeCarStateForHandoff()
+    self._disengage_edge(cc)
+    cs.post_response(0x7F, 0x28, 0x22)
+    cc._tick_handoff_watchdog(cs)
+    self.assertEqual(cc.handoff_fault, 2)
+    # Fault must persist for HANDOFF_FAULT_LATCH_FRAMES so selfdrived has time to observe it.
+    cc.frame += cc.HANDOFF_FAULT_LATCH_FRAMES - 1
+    cc._tick_handoff_watchdog(cs)
+    self.assertEqual(cc.handoff_fault, 2)
+    cc.frame += 2
+    cc._tick_handoff_watchdog(cs)
+    self.assertEqual(cc.handoff_fault, 0)
+
+  def test_engage_fault_outranks_disengage_fault(self):
+    cc = self._build_controller()
+    cs = _FakeCarStateForHandoff()
+    self._disengage_edge(cc)
+    cs.post_response(0x7F, 0x28, 0x22)
+    cc._tick_handoff_watchdog(cs)
+    self.assertEqual(cc.handoff_fault, 2)
+    # Now an engage edge faults too — fault must escalate to 1 (engage), not stay at 2.
+    self._engage_edge(cc)
+    cs.post_response(0x7F, 0x10, 0x22)
+    cc._tick_handoff_watchdog(cs)
+    self.assertEqual(cc.handoff_fault, 1)

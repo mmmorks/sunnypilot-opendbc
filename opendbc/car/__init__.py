@@ -123,6 +123,24 @@ def make_communication_control_msg(addr, bus, sub_function, communication_type=0
   return CanData(addr, bytes(dat), bus)
 
 
+def make_diagnostic_session_control_msg(addr, bus, sub_function, suppress_response=False):
+  """UDS service 0x10 DiagnosticSessionControl.
+
+  sub_function:
+    0x01 = defaultSession
+    0x02 = programmingSession
+    0x03 = extendedDiagnosticSession
+    0x04 = safetySystemDiagnosticSession
+
+  Idempotent: re-sending the same sub-function while already in that session simply
+  restarts the ECU's S3 timer.
+  """
+  sf = sub_function | (0x80 if suppress_response else 0x00)
+  dat = [0x02, 0x10, sf]
+  dat.extend([0x0] * (8 - len(dat)))
+  return CanData(addr, bytes(dat), bus)
+
+
 def get_safety_config(safety_model: structs.CarParams.SafetyModel, safety_param: int | None = None) -> structs.CarParams.SafetyConfig:
   ret = structs.CarParams.SafetyConfig()
   ret.safetyModel = safety_model

@@ -238,7 +238,11 @@ class CarInterface(CarInterfaceBase):
       addr, bus = 0x7d0, CanBus(CP).ECAN if CP.flags & HyundaiFlags.CANFD else 0
       if CP.flags & HyundaiFlags.CANFD_LKA_STEERING.value:
         addr, bus = 0x730, CanBus(CP).ECAN
-      disable_ecu(can_recv, can_send, bus=bus, addr=addr, com_cont_req=communication_control)
+      # Under dynamic radar handoff, the ADAS DRV ECU must stay healthy at boot — the carcontroller
+      # re-applies the extended-session + disableRxAndTx sequence on each engage edge instead.
+      dynamic_handoff = bool(CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF)
+      if not dynamic_handoff:
+        disable_ecu(can_recv, can_send, bus=bus, addr=addr, com_cont_req=communication_control)
 
     # for blinkers
     if CP.flags & HyundaiFlags.ENABLE_BLINKERS:

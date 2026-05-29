@@ -6,7 +6,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.hyundai.hyundaicanfd import CanBus
-from opendbc.car.hyundai.values import HyundaiFlags, CAR, DBC, Buttons, CarControllerParams
+from opendbc.car.hyundai.values import HyundaiFlags, HyundaiSafetyFlags, CAR, DBC, Buttons, CarControllerParams
 from opendbc.car.interfaces import CarStateBase
 
 from opendbc.sunnypilot.car.hyundai.carstate_ext import CarStateExt
@@ -70,6 +70,15 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
     self.cluster_speed_counter = CLUSTER_SAMPLE_RATE
 
     self.params = CarControllerParams(CP)
+
+    # dynamic radar handoff: track last UDS response from ADAS DRV ECU (0x738), used by carcontroller's watchdog
+    # to detect a missing or negative ack to its engage/disengage edge frames.
+    self.adas_drv_uds_response_isotp_len: int = 0
+    self.adas_drv_uds_response_byte1: int = 0
+    self.adas_drv_uds_response_byte2: int = 0
+    self.adas_drv_uds_response_byte3: int = 0
+    self.adas_drv_uds_response_count: int = 0  # parser counter; carcontroller compares against snapshots
+    self._prev_adas_drv_uds_response_count: int = 0
 
   def recent_button_interaction(self) -> bool:
     # On some newer model years, the CANCEL button acts as a pause/resume button based on the PCM state
@@ -313,6 +322,18 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
 
     CarStateExt.update_canfd_ext(self, ret, ret_sp, can_parsers, speed_factor)
 
+    # dynamic radar handoff: snapshot the latest UDS response from ADAS DRV ECU (0x738). The carcontroller
+    # watchdog compares the response_count delta to detect a newly-arrived response between edge fire and tick.
+    if self.CP.safetyConfigs and self.CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF:
+      new_count = int(cp.ts_nanos["ADAS_DRV_UDS_RESPONSE"]["ISO_TP_LEN"])
+      if new_count != self._prev_adas_drv_uds_response_count:
+        self._prev_adas_drv_uds_response_count = new_count
+        self.adas_drv_uds_response_count += 1
+        self.adas_drv_uds_response_isotp_len = int(cp.vl["ADAS_DRV_UDS_RESPONSE"]["ISO_TP_LEN"])
+        self.adas_drv_uds_response_byte1 = int(cp.vl["ADAS_DRV_UDS_RESPONSE"]["UDS_BYTE_1"])
+        self.adas_drv_uds_response_byte2 = int(cp.vl["ADAS_DRV_UDS_RESPONSE"]["UDS_BYTE_2"])
+        self.adas_drv_uds_response_byte3 = int(cp.vl["ADAS_DRV_UDS_RESPONSE"]["UDS_BYTE_3"])
+
     ret.blockPcmEnable = not self.recent_button_interaction()
 
     return ret, ret_sp
@@ -325,6 +346,9 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
         # this message is 50Hz but the ECU frequently stops transmitting for ~0.5s
         ("CRUISE_BUTTONS", 1)
       ]
+    # dynamic radar handoff: subscribe to ADAS DRV ECU UDS responses (sporadic; expected only on engage/disengage edges)
+    if CP.safetyConfigs and CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF:
+      msgs += [("ADAS_DRV_UDS_RESPONSE", 0)]
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], msgs, CanBus(CP).ECAN),
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).CAM),

@@ -115,6 +115,10 @@ class CarInterfaceBase(ABC, CarInterfaceBaseSP):
     dbc_names = {bus: cp.dbc_name for bus, cp in self.can_parsers.items()}
     self.CC: CarControllerBase = self.CarController(dbc_names, CP, CP_SP)
 
+    # Back-reference so CarState extensions can read CarController state (e.g. handoff watchdog flags) when
+    # building the next-frame ret_sp.
+    self.CS.CC = self.CC
+
   def apply(self, c: structs.CarControl, c_sp: structs.CarControlSP, now_nanos: int | None = None) -> tuple[structs.CarControl.Actuators, list[CanData]]:
     if now_nanos is None:
       now_nanos = int(time.monotonic() * 1e9)

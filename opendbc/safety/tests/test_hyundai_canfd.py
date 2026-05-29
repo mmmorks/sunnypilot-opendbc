@@ -395,6 +395,41 @@ class TestHyundaiCanfdLKASteeringLongDynamicHandoff(TestHyundaiCanfdLKASteeringL
     msg = _lspy.make_CANPacket(0x730, 1, b"\x02\x3E\x80\x00\x00\x00\x00\x00")
     self.assertTrue(self._tx(msg))
 
+  def test_uds_730_handoff_frames_allowed(self):
+    """Under dynamic handoff, 0x730 accepts the four non-suppress UDS frames the carcontroller emits.
+
+    Suppress-response is deliberately NOT set on edge frames so positive acks ("\x02\x50\x03..." etc.) and NRCs
+    ("\x03\x7F\x10..." / "\x03\x7F\x28...") land on 0x738 and are observable in route/cabana logs.
+    """
+    from opendbc.safety.tests.libsafety import libsafety_py as _lspy
+    handoff_frames = (
+      b"\x02\x10\x03\x00\x00\x00\x00\x00",  # 0x10 extendedDiagnosticSession (engage step 1)
+      b"\x03\x28\x03\x01\x00\x00\x00\x00",  # 0x28 disableRxAndTx            (engage step 2)
+      b"\x03\x28\x00\x01\x00\x00\x00\x00",  # 0x28 enableRxAndTx             (disengage step 1)
+      b"\x02\x10\x01\x00\x00\x00\x00\x00",  # 0x10 defaultSession            (disengage step 2)
+    )
+    for controls_allowed in (False, True):
+      self.safety.set_controls_allowed(controls_allowed)
+      for payload in handoff_frames:
+        msg = _lspy.make_CANPacket(0x730, 1, payload)
+        self.assertTrue(self._tx(msg), f"{payload.hex()} must pass with controls_allowed={controls_allowed}")
+
+  def test_uds_730_other_payloads_blocked(self):
+    """Under dynamic handoff, 0x730 still rejects payloads not on the exact allowlist (including the
+    suppress-response variants of the handoff frames — the carcontroller no longer emits those)."""
+    from opendbc.safety.tests.libsafety import libsafety_py as _lspy
+    self.safety.set_controls_allowed(False)
+    for payload in (
+      b"\x02\x10\x83\x00\x00\x00\x00\x00",  # 0x10 extendedSession WITH suppress — old pattern, no longer permitted
+      b"\x03\x28\x83\x01\x00\x00\x00\x00",  # 0x28 disableRxAndTx WITH suppress  — old pattern, no longer permitted
+      b"\x03\x28\x80\x01\x00\x00\x00\x00",  # 0x28 enableRxAndTx  WITH suppress  — old pattern, no longer permitted
+      b"\x02\x10\x81\x00\x00\x00\x00\x00",  # 0x10 defaultSession WITH suppress  — old pattern, no longer permitted
+      b"\x03\x28\x00\x00\x00\x00\x00\x00",  # 0x28 with wrong communicationType
+      b"\x02\x11\x03\x00\x00\x00\x00\x00",  # ECU reset — never permitted
+    ):
+      msg = _lspy.make_CANPacket(0x730, 1, payload)
+      self.assertFalse(self._tx(msg), f"payload {payload.hex()} must be rejected")
+
   def test_accel_actuation_limits(self):
     """
     Under dynamic handoff, ALL SCC_CONTROL is blocked when controls_allowed=False —
@@ -477,6 +512,19 @@ class TestHyundaiCanfdNoHandoffRegression(TestHyundaiCanfdLKASteeringLongEV):
     """Without dynamic handoff, stock SCC (0x1A0) must be blocked regardless of controls_allowed state."""
     self.safety.set_controls_allowed(True)
     self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x1A0))
+
+  def test_uds_730_handoff_frames_blocked_without_handoff(self):
+    """Without dynamic handoff, none of the handoff UDS frames are permitted on 0x730 (strict tester-present-only policy)."""
+    from opendbc.safety.tests.libsafety import libsafety_py as _lspy
+    self.safety.set_controls_allowed(False)
+    for payload in (
+      b"\x02\x10\x03\x00\x00\x00\x00\x00",
+      b"\x03\x28\x03\x01\x00\x00\x00\x00",
+      b"\x03\x28\x00\x01\x00\x00\x00\x00",
+      b"\x02\x10\x01\x00\x00\x00\x00\x00",
+    ):
+      msg = _lspy.make_CANPacket(0x730, 1, payload)
+      self.assertFalse(self._tx(msg), f"{payload.hex()} must be rejected when handoff bit is unset")
 
 
 if __name__ == "__main__":
