@@ -313,8 +313,8 @@ class CarStateBase(ABC):
     self.out = structs.CarState()
     self.out_sp = structs.CarStateSP()
 
-    # Back-reference to the CarController, wired by CarInterfaceBase.__init__ after both are built. Lets
-    # CarState extensions read CarController state (e.g. the dynamic-handoff watchdog) when building ret_sp.
+    # Back-reference to the CarController, wired by CarInterfaceBase.__init__ after both are built. Allows
+    # CarState extensions to read CarController state (e.g. the dynamic-handoff watchdog) when building ret_sp.
     # Declared here (default None) so it is an explicit, type-safe attribute that reads fail-soft.
     self.CC: CarControllerBase | None = None
 

@@ -258,7 +258,7 @@ class TestHyundaiFingerprint(unittest.TestCase):
 
 
 class TestHyundaiCarParamsDynamicHandoff(unittest.TestCase):
-  """Tests that CANFD_DYNAMIC_HANDOFF safety bit is set iff all conditions are met.
+  """Tests that CANFD_DYNAMIC_HANDOFF safety bit is set if and only if all conditions are met.
 
   Conditions:
     1. HDA II detected (CANFD_LKA_STEERING flag set)

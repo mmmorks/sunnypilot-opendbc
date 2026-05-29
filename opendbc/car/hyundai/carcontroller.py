@@ -75,7 +75,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     # On an engage/disengage edge we build a SEQUENTIAL list of UDS steps. Only one request is ever outstanding
     # at a time: the watchdog sends step N, waits for its specific ack on 0x738, then sends step N+1. This is
     # required because the 0x738 parser (carstate) only retains the LATEST frame per 100Hz cycle — firing both
-    # requests in one frame lets the two responses coalesce into one cycle, silently dropping an ack (false
+    # requests in one frame allows the two responses to coalesce into one cycle, silently dropping an ack (false
     # timeout) or an NRC (false success). Serializing guarantees at most one response per cycle.
     # Each step is a dict: {'msg', 'expected' (positive ack byte1), 'nrc_service' (orig service id), 'sent_frame', 'deadline'}.
     # A timed-out or NRC'd step sets self.handoff_fault, which the CarState bridge surfaces to
@@ -170,7 +170,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     # dynamic handoff: on disengage->engage edge, re-silence the ADAS DRV ECU. Boot disable was skipped under
     # dynamic handoff so the ECU is in default session here; the 1Hz tester-present that resumes this frame
     # keeps the extended session alive (ECU S3 timer ~5s). extendedSession is established first, then
-    # disableRxAndTx (which panda only accepts while controls_allowed) — sequencing also lets controls_allowed
+    # disableRxAndTx (which panda only accepts while controls_allowed) — sequencing also allows controls_allowed to
     # settle before the silencing frame is sent. A new edge supersedes any in-flight sequence.
     if engage_edge:
       self._handoff_seq = [
@@ -206,7 +206,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     return new_actuators, can_sends
 
   def _make_handoff_step(self, msg, expected, nrc_service):
-    # One sequential UDS step for the handoff watchdog. retries_left lets a timed-out step be re-sent before
+    # One sequential UDS step for the handoff watchdog. retries_left allows a timed-out step to be re-sent before
     # it escalates to a latched fault (see HANDOFF_STEP_MAX_RETRIES).
     return {'msg': msg, 'expected': expected, 'nrc_service': nrc_service,
             'sent_frame': None, 'deadline': None, 'retries_left': self.HANDOFF_STEP_MAX_RETRIES}
