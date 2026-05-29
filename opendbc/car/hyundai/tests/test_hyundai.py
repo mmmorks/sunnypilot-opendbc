@@ -407,10 +407,16 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     cc = self._build_controller()
     cs = _FakeCarStateForHandoff()
     self._engage_edge(cc)
-    self._tick(cc, cs); cc.frame += 1                          # sends step 0 (extendedSession)
-    cs.post_response(0x50, 0x03); self._tick(cc, cs); cc.frame += 1   # ack step 0 → advance
-    self._tick(cc, cs); cc.frame += 1                          # sends step 1 (disableRxAndTx)
-    cs.post_response(0x68, 0x03, 0x01); self._tick(cc, cs); cc.frame += 1   # ack step 1 → done
+    self._tick(cc, cs)                                        # sends step 0 (extendedSession)
+    cc.frame += 1
+    cs.post_response(0x50, 0x03)                              # ack step 0 → advance
+    self._tick(cc, cs)
+    cc.frame += 1
+    self._tick(cc, cs)                                        # sends step 1 (disableRxAndTx)
+    cc.frame += 1
+    cs.post_response(0x68, 0x03, 0x01)                        # ack step 1 → done
+    self._tick(cc, cs)
+    cc.frame += 1
     self.assertEqual(cc._handoff_seq, [])
     self.assertEqual(cc.handoff_fault, 0)
 
@@ -420,12 +426,15 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     cc = self._build_controller()
     cs = _FakeCarStateForHandoff()
     self._engage_edge(cc)
-    s1 = []; cc._tick_handoff_watchdog(cs, s1)                 # sends step 0 only
+    s1 = []
+    cc._tick_handoff_watchdog(cs, s1)                         # sends step 0 only
     self.assertEqual(len(s1), 1)
     cs.post_response(0x50, 0x03)
-    s2 = []; cc._tick_handoff_watchdog(cs, s2)                 # acks step 0; does NOT send step 1 same tick
+    s2 = []
+    cc._tick_handoff_watchdog(cs, s2)                         # acks step 0; does NOT send step 1 same tick
     self.assertEqual(len(s2), 0)
-    s3 = []; cc._tick_handoff_watchdog(cs, s3)                 # now sends step 1
+    s3 = []
+    cc._tick_handoff_watchdog(cs, s3)                         # now sends step 1
     self.assertEqual(len(s3), 1)
 
   def test_engage_nrc_on_session_control_sets_engage_fault(self):

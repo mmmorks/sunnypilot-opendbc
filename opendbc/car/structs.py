@@ -170,3 +170,11 @@ class CarControlSP:
 @auto_dataclass
 class CarStateSP:
   speedLimit: float = auto_field()
+  adasDrvHandoffFault: 'CarStateSP.HandoffFault' = field(
+    default_factory=lambda: CarStateSP.HandoffFault.none
+  )
+
+  class HandoffFault(StrEnum):
+    none = auto()
+    engageFailed = auto()
+    disengageFailed = auto()

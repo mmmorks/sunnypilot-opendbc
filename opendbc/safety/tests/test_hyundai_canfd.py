@@ -482,21 +482,18 @@ class TestHyundaiCanfdLKASteeringLongDynamicHandoff(TestHyundaiCanfdLKASteeringL
     so the acc_main_on sync mechanism via _tx_acc_state_msg does not fire.
     This test is not applicable in dynamic handoff mode.
     """
-    pass
 
   def test_acc_main_sync_mismatch_counter(self):
     """
     Under dynamic handoff, SCC_CONTROL TX is blocked when controls_allowed=False,
     so the acc_main_on mismatch counter cannot be driven via TX. Not applicable here.
     """
-    pass
 
   def test_acc_main_sync_mismatch_recovery(self):
     """
     Under dynamic handoff, SCC_CONTROL TX is blocked when controls_allowed=False,
     so the acc_main_on mismatch recovery cannot be driven via TX. Not applicable here.
     """
-    pass
 
 
 class TestHyundaiCanfdNoHandoffRegression(TestHyundaiCanfdLKASteeringLongEV):
