@@ -162,21 +162,26 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *msg) {
     .has_steer_req_tolerance = true,
   };
 
+  bool tx = true;
+
   // Under dynamic handoff, block longitudinal commands when controls are not allowed.
   // This prevents the ADAS unit from issuing accel/decel while the handoff is in progress.
+  bool handoff_blocked = false;
   if (hyundai_canfd_dynamic_handoff && !controls_allowed) {
     if ((msg->addr == 0x1a0U) && hyundai_longitudinal) {
-      return false;
+      handoff_blocked = true;
     }
     const uint32_t adrv_addrs[] = {0x51U, 0x160U, 0x1EAU, 0x200U, 0x345U, 0x1DAU};
-    for (int i = 0; i < (int)(sizeof(adrv_addrs) / sizeof(adrv_addrs[0])); i++) {
+    const int adrv_addrs_len = sizeof(adrv_addrs) / sizeof(adrv_addrs[0]);
+    for (int i = 0; i < adrv_addrs_len; i++) {
       if (msg->addr == adrv_addrs[i]) {
-        return false;
+        handoff_blocked = true;
       }
     }
   }
-
-  bool tx = true;
+  if (handoff_blocked) {
+    tx = false;
+  }
 
   // steering
   const unsigned int steer_addr = (hyundai_canfd_lka_steering && !hyundai_longitudinal) ? hyundai_canfd_get_lka_addr() : 0x12aU;
@@ -228,7 +233,7 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *msg) {
   }
 
   // ACCEL: safety check
-  if (msg->addr == 0x1a0U) {
+  if (!handoff_blocked && (msg->addr == 0x1a0U)) {
     int desired_accel_raw = (((msg->data[17] & 0x7U) << 8) | msg->data[16]) - 1023U;
     int desired_accel_val = ((msg->data[18] << 4) | (msg->data[17] >> 4)) - 1023U;
 
@@ -267,7 +272,8 @@ static bool hyundai_canfd_fwd_hook(int bus_num, int addr) {
   // LFA-steering long uses static TX-list blocking (check_relay) for 0x1A0.
   if (hyundai_longitudinal && hyundai_canfd_lka_steering) {
     const int handoff_addrs[] = {0x1a0, 0x51, 0x160, 0x1EA, 0x200, 0x345, 0x1DA};
-    for (int i = 0; i < (int)(sizeof(handoff_addrs) / sizeof(handoff_addrs[0])); i++) {
+    const int handoff_addrs_len = sizeof(handoff_addrs) / sizeof(handoff_addrs[0]);
+    for (int i = 0; i < handoff_addrs_len; i++) {
       if (addr == handoff_addrs[i]) {
         // Without dynamic handoff: always block (preserves pre-PR static-blocking behavior).
         // With dynamic handoff: block only when openpilot is the longitudinal authority.
