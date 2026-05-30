@@ -54,7 +54,7 @@ class TestHyundaiFingerprint(unittest.TestCase):
         cam_can = CanBus(None, fingerprint).CAM
         fingerprint[cam_can] = [0x50, 0x110]  # LKA steering messages
       CP = CarInterface.get_params(CAR.KIA_EV6, fingerprint, [], False, False, False)
-      assert bool(CP.flags & HyundaiFlags.CANFD_LKA_STEERING) == lka_steering
+      assert bool(CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG) == lka_steering
 
     # radar available
     for radar in (True, False):
@@ -76,7 +76,8 @@ class TestHyundaiFingerprint(unittest.TestCase):
     assert set.union(*CAN_GEARS.values()) & (HYBRID_CAR | EV_CAR) == set()
 
     # Test CAN FD car not in CAN feature lists
-    can_specific_feature_list = set.union(*CAN_GEARS.values(), *CHECKSUM.values(), LEGACY_SAFETY_MODE_CAR, UNSUPPORTED_LONGITUDINAL_CAR, CAMERA_SCC_CAR)
+    can_specific_feature_list = set.union(*CAN_GEARS.values(), *CHECKSUM.values(), LEGACY_SAFETY_MODE_CAR,
+                                          *UNSUPPORTED_LONGITUDINAL_CAR.values(), CAMERA_SCC_CAR)
     for car_model in CANFD_CAR:
       assert car_model not in can_specific_feature_list, "CAN FD car unexpectedly found in a CAN feature list"
 
@@ -261,7 +262,7 @@ class TestHyundaiCarParamsDynamicHandoff(unittest.TestCase):
   """Tests that CANFD_DYNAMIC_HANDOFF safety bit is set if and only if all conditions are met.
 
   Conditions:
-    1. HDA II detected (CANFD_LKA_STEERING flag set)
+    1. HDA II detected (CANFD_LKA_STEER_MSG flag set)
     2. CANFD_NO_RADAR_DISABLE not set
     3. CANFD_CAMERA_SCC not set
     4. DynamicRadarHandoffEnabled param == "1"
@@ -269,7 +270,7 @@ class TestHyundaiCarParamsDynamicHandoff(unittest.TestCase):
   """
 
   # GENESIS_GV70_ELECTRIFIED_1ST_GEN: CAN-FD EV, no CANFD_NO_RADAR_DISABLE, no CANFD_CAMERA_SCC by default.
-  # Adding 0x50 to fingerprint[cam_can] triggers CANFD_LKA_STEERING (HDA II).
+  # Adding 0x50 to fingerprint[cam_can] triggers CANFD_LKA_STEER_MSG (HDA II).
   CANDIDATE = CAR.GENESIS_GV70_ELECTRIFIED_1ST_GEN
 
   # Provide an ADAS ECU so alphaLongitudinalAvailable is True for LKA steering cars.
@@ -278,7 +279,7 @@ class TestHyundaiCarParamsDynamicHandoff(unittest.TestCase):
   def _build_fingerprint_with_lka(self):
     fingerprint = gen_empty_fingerprint()
     cam_can = CanBus(None, fingerprint).CAM
-    fingerprint[cam_can][0x50] = 8  # triggers CANFD_LKA_STEERING
+    fingerprint[cam_can][0x50] = 8  # triggers CANFD_LKA_STEER_MSG
     return fingerprint
 
   def _build_fingerprint_no_lka(self):
@@ -298,7 +299,7 @@ class TestHyundaiCarParamsDynamicHandoff(unittest.TestCase):
     """All five conditions satisfied -> CANFD_DYNAMIC_HANDOFF bit must be set."""
     fingerprint = self._build_fingerprint_with_lka()
     CP = self._get_params_and_apply(fingerprint, self.ADAS_FW, True, self._all_params())
-    assert CP.flags & HyundaiFlags.CANFD_LKA_STEERING, "Precondition: LKA_STEERING must be set"
+    assert CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG, "Precondition: LKA_STEERING must be set"
     assert CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF, \
       "CANFD_DYNAMIC_HANDOFF bit must be set when all conditions are met"
 
@@ -332,15 +333,15 @@ class TestHyundaiCarParamsDynamicHandoff(unittest.TestCase):
     """HDA II flag absent (no LKA steering messages) -> bit clear."""
     fingerprint = self._build_fingerprint_no_lka()
     CP = self._get_params_and_apply(fingerprint, [], False, self._all_params())
-    assert not (CP.flags & HyundaiFlags.CANFD_LKA_STEERING), "Precondition: LKA_STEERING must not be set"
+    assert not (CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG), "Precondition: LKA_STEERING must not be set"
     assert not (CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF), \
-      "CANFD_DYNAMIC_HANDOFF bit must be clear when CANFD_LKA_STEERING is not set"
+      "CANFD_DYNAMIC_HANDOFF bit must be clear when CANFD_LKA_STEER_MSG is not set"
 
   def test_canfd_no_radar_disable_bit_clear(self):
     """CANFD_NO_RADAR_DISABLE present -> bit clear (car cannot disable radar ECU)."""
     fingerprint = self._build_fingerprint_with_lka()
     # HYUNDAI_KONA_EV_2ND_GEN has CANFD_NO_RADAR_DISABLE in its platform flags; adding LKA steering fingerprint
-    # triggers CANFD_LKA_STEERING as well, giving us both conditions to test the exclusion.
+    # triggers CANFD_LKA_STEER_MSG as well, giving us both conditions to test the exclusion.
     candidate = CAR.HYUNDAI_KONA_EV_2ND_GEN
     CP = CarInterface.get_params(candidate, fingerprint, self.ADAS_FW, True, False, False)
     CP_SP = CarInterface.get_non_essential_params_sp(CP, candidate)
@@ -388,7 +389,7 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
   def _build_controller(self):
     from opendbc.car.hyundai.carcontroller import CarController
     fingerprint = gen_empty_fingerprint()
-    fingerprint[CanBus(None, fingerprint).CAM][0x50] = 8  # CANFD_LKA_STEERING
+    fingerprint[CanBus(None, fingerprint).CAM][0x50] = 8  # CANFD_LKA_STEER_MSG
     adas_fw = [CarParams.CarFw(ecu=CarParams.Ecu.adas, fwVersion=b'test', address=0x0, subAddress=0)]
     CP = CarInterface.get_params(self.CANDIDATE, fingerprint, adas_fw, True, False, False)
     CP_SP = CarInterface.get_non_essential_params_sp(CP, self.CANDIDATE)

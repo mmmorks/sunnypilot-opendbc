@@ -152,13 +152,13 @@ def _initialize_toyota(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params
 def _initialize_dynamic_radar_handoff(CP: structs.CarParams, params_dict: dict[str, str]) -> None:
   """Set CANFD_DYNAMIC_HANDOFF safety bit when all conditions for dynamic radar handoff are met.
 
-  Conditions: HDA II (CANFD_LKA_STEERING) + not CANFD_NO_RADAR_DISABLE + not CANFD_CAMERA_SCC
+  Conditions: HDA II (CANFD_LKA_STEER_MSG) + not CANFD_NO_RADAR_DISABLE + not CANFD_CAMERA_SCC
               + openpilot longitudinal active + DynamicRadarHandoffEnabled param + AlphaLongitudinalEnabled param.
   """
   if CP.brand != 'hyundai':
     return
 
-  if not (CP.flags & HyundaiFlags.CANFD_LKA_STEERING):
+  if not (CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG):
     return
 
   if CP.flags & HyundaiFlags.CANFD_NO_RADAR_DISABLE:
