@@ -348,7 +348,7 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
       ]
     # dynamic radar handoff: subscribe to ADAS DRV ECU UDS responses (sporadic; expected only on engage/disengage edges)
     if CP.safetyConfigs and CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF:
-      msgs += [("ADAS_DRV_UDS_RESPONSE", 0)]
+      msgs += [("ADAS_DRV_UDS_RESPONSE", float('nan'))]
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], msgs, CanBus(CP).ECAN),
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).CAM),
