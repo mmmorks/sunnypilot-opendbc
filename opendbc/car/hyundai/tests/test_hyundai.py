@@ -3,7 +3,7 @@ from hypothesis import settings, given, strategies as st
 import unittest
 
 from opendbc.car import gen_empty_fingerprint
-from opendbc.car.structs import CarParams
+from opendbc.car.structs import CarParams, CarStateSP
 from opendbc.car.fw_versions import build_fw_dict
 from opendbc.car.hyundai.interface import CarInterface
 from opendbc.car.hyundai.hyundaicanfd import CanBus
@@ -17,6 +17,7 @@ from opendbc.car.hyundai.fingerprints import FW_VERSIONS
 from opendbc.sunnypilot.car.interfaces import setup_interfaces
 
 Ecu = CarParams.Ecu
+HandoffFault = CarStateSP.HandoffFault
 
 # Some platforms have date codes in a different format we don't yet parse (or are missing).
 # For now, assert list of expected missing date cars
@@ -430,7 +431,7 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     self._tick(cc, cs)
     cc.frame += 1
     self.assertEqual(cc._handoff_seq, [])
-    self.assertEqual(cc.handoff_fault, 0)
+    self.assertEqual(cc.handoff_fault, HandoffFault.none)
 
   def test_requests_sent_one_at_a_time(self):
     # Core anti-coalescing property: only one UDS request is ever outstanding, so the latest-frame-only
@@ -457,7 +458,7 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     # 0x7F 0x10 <code>: ECU rejected the SessionControl request.
     cs.post_response(0x7F, 0x10, 0x22)
     self._tick(cc, cs)
-    self.assertEqual(cc.handoff_fault, 1)
+    self.assertEqual(cc.handoff_fault, HandoffFault.engageFailed)
 
   def test_engage_timeout_sets_engage_fault(self):
     cc = self._build_controller()
@@ -467,7 +468,7 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     # No response, advance past the deadline.
     cc.frame += cc.HANDOFF_RESPONSE_DEADLINE_FRAMES + 1
     self._tick(cc, cs)
-    self.assertEqual(cc.handoff_fault, 1)
+    self.assertEqual(cc.handoff_fault, HandoffFault.engageFailed)
 
   def test_disengage_nrc_sets_disengage_fault(self):
     cc = self._build_controller()
@@ -476,7 +477,7 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     self._tick(cc, cs)                                         # send step 0
     cs.post_response(0x7F, 0x28, 0x22)
     self._tick(cc, cs)
-    self.assertEqual(cc.handoff_fault, 2)
+    self.assertEqual(cc.handoff_fault, HandoffFault.disengageFailed)
 
   def test_fault_latches_then_clears(self):
     cc = self._build_controller()
@@ -485,14 +486,14 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     self._tick(cc, cs)                                         # send step 0
     cs.post_response(0x7F, 0x28, 0x22)
     self._tick(cc, cs)
-    self.assertEqual(cc.handoff_fault, 2)
+    self.assertEqual(cc.handoff_fault, HandoffFault.disengageFailed)
     # Fault must persist for HANDOFF_FAULT_LATCH_FRAMES so selfdrived has time to observe it.
     cc.frame += cc.HANDOFF_FAULT_LATCH_FRAMES - 1
     self._tick(cc, cs)
-    self.assertEqual(cc.handoff_fault, 2)
+    self.assertEqual(cc.handoff_fault, HandoffFault.disengageFailed)
     cc.frame += 2
     self._tick(cc, cs)
-    self.assertEqual(cc.handoff_fault, 0)
+    self.assertEqual(cc.handoff_fault, HandoffFault.none)
 
   def test_engage_fault_outranks_disengage_fault(self):
     cc = self._build_controller()
@@ -501,13 +502,13 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     self._tick(cc, cs)                                         # send disengage step 0
     cs.post_response(0x7F, 0x28, 0x22)
     self._tick(cc, cs)
-    self.assertEqual(cc.handoff_fault, 2)
-    # Now an engage edge supersedes and faults too — fault must escalate to 1 (engage), not stay at 2.
+    self.assertEqual(cc.handoff_fault, HandoffFault.disengageFailed)
+    # Now an engage edge supersedes and faults too — must escalate to engageFailed, not stay at disengageFailed.
     self._engage_edge(cc)
     self._tick(cc, cs)                                         # send engage step 0
     cs.post_response(0x7F, 0x10, 0x22)
     self._tick(cc, cs)
-    self.assertEqual(cc.handoff_fault, 1)
+    self.assertEqual(cc.handoff_fault, HandoffFault.engageFailed)
 
   def test_make_handoff_step_sets_retries(self):
     # Steps the carcontroller builds on a real edge must carry a positive retry budget so a single dropped
@@ -527,12 +528,12 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     self._tick(cc, cs)                                         # send attempt 1
     cc.frame += cc.HANDOFF_RESPONSE_DEADLINE_FRAMES + 1
     self._tick(cc, cs)                                         # attempt 1 times out → retry, no fault
-    self.assertEqual(cc.handoff_fault, 0)
+    self.assertEqual(cc.handoff_fault, HandoffFault.none)
     self.assertEqual(len(cc._handoff_seq), 1)                  # step still pending
     self._tick(cc, cs)                                         # re-send attempt 2
     cs.post_response(0x50, 0x03)                               # ECU acks this time
     self._tick(cc, cs)
-    self.assertEqual(cc.handoff_fault, 0)
+    self.assertEqual(cc.handoff_fault, HandoffFault.none)
     self.assertEqual(cc._handoff_seq, [])                      # advanced past the step
 
   def test_timeout_exhausts_retries_then_faults(self):
@@ -541,11 +542,11 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     cc._handoff_seq = [self._step(0x50, 0x10, retries=2)]      # initial attempt + 2 retries = 3 timeouts to fault
     cc._handoff_seq_kind = 1
     for _ in range(3):
-      self.assertEqual(cc.handoff_fault, 0)
+      self.assertEqual(cc.handoff_fault, HandoffFault.none)
       self._tick(cc, cs)                                       # (re)send
       cc.frame += cc.HANDOFF_RESPONSE_DEADLINE_FRAMES + 1
       self._tick(cc, cs)                                       # time out
-    self.assertEqual(cc.handoff_fault, 1)
+    self.assertEqual(cc.handoff_fault, HandoffFault.engageFailed)
 
   def test_nrc_does_not_retry(self):
     # An NRC is an explicit ECU rejection; retrying won't help, so the fault latches immediately even with
@@ -557,17 +558,5 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     self._tick(cc, cs)                                         # send
     cs.post_response(0x7F, 0x10, 0x22)                         # NRC for SessionControl
     self._tick(cc, cs)
-    self.assertEqual(cc.handoff_fault, 1)
+    self.assertEqual(cc.handoff_fault, HandoffFault.engageFailed)
     self.assertEqual(cc._handoff_seq, [])
-
-  def test_carstate_declares_cc_backref(self):
-    # CarStateBase must declare CC (default None) so the back-ref is an explicit, type-safe attribute and a
-    # missing wiring reads as None (fail-soft) rather than raising AttributeError.
-    from opendbc.car.hyundai.carstate import CarState
-    fingerprint = gen_empty_fingerprint()
-    fingerprint[CanBus(None, fingerprint).CAM][0x50] = 8
-    adas_fw = [CarParams.CarFw(ecu=CarParams.Ecu.adas, fwVersion=b'test', address=0x0, subAddress=0)]
-    CP = CarInterface.get_params(self.CANDIDATE, fingerprint, adas_fw, True, False, False)
-    CP_SP = CarInterface.get_non_essential_params_sp(CP, self.CANDIDATE)
-    cs = CarState(CP, CP_SP)
-    self.assertIsNone(cs.CC)

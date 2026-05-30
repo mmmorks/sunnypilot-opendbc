@@ -56,6 +56,23 @@ static unsigned int hyundai_canfd_get_lka_addr(void) {
   return hyundai_canfd_lka_steer_msg_alt ? 0x110U : 0x50U;
 }
 
+// ADRV DRV ECU broadcast addresses. Under dynamic handoff openpilot impersonates these while engaged, so they
+// must be gated on controls_allowed identically in the tx hook (openpilot's own transmits) and the fwd hook
+// (the stock ECU's broadcasts) — sharing one list keeps the two callers in sync. 0x1A0 (SCC_CONTROL) shares the
+// same gating but is handled separately by each caller (the tx hook runs an accel safety check on it; the fwd
+// hook lists it alongside this call), so it is intentionally not included here.
+static bool hyundai_canfd_handoff_adrv_addr(int addr) {
+  const int adrv_addrs[] = {0x51, 0x160, 0x1EA, 0x200, 0x345, 0x1DA};
+  const int adrv_addrs_len = sizeof(adrv_addrs) / sizeof(adrv_addrs[0]);
+  bool found = false;
+  for (int i = 0; i < adrv_addrs_len; i++) {
+    if (addr == adrv_addrs[i]) {
+      found = true;
+    }
+  }
+  return found;
+}
+
 static uint8_t hyundai_canfd_get_counter(const CANPacket_t *msg) {
   uint8_t ret = 0;
   if (GET_LEN(msg) == 8U) {
@@ -168,15 +185,8 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *msg) {
   // This prevents the ADAS unit from issuing accel/decel while the handoff is in progress.
   bool handoff_blocked = false;
   if (hyundai_canfd_dynamic_handoff && !controls_allowed) {
-    if ((msg->addr == 0x1a0U) && hyundai_longitudinal) {
+    if (((msg->addr == 0x1a0U) && hyundai_longitudinal) || hyundai_canfd_handoff_adrv_addr(msg->addr)) {
       handoff_blocked = true;
-    }
-    const uint32_t adrv_addrs[] = {0x51U, 0x160U, 0x1EAU, 0x200U, 0x345U, 0x1DAU};
-    const int adrv_addrs_len = sizeof(adrv_addrs) / sizeof(adrv_addrs[0]);
-    for (int i = 0; i < adrv_addrs_len; i++) {
-      if (msg->addr == adrv_addrs[i]) {
-        handoff_blocked = true;
-      }
     }
   }
   if (handoff_blocked) {
@@ -271,15 +281,10 @@ static bool hyundai_canfd_fwd_hook(int bus_num, int addr) {
   // Only apply longitudinal forwarding control for LKA-steering long users.
   // LFA-steering long uses static TX-list blocking (check_relay) for 0x1A0.
   if (hyundai_longitudinal && hyundai_canfd_lka_steer_msg) {
-    const int handoff_addrs[] = {0x1a0, 0x51, 0x160, 0x1EA, 0x200, 0x345, 0x1DA};
-    const int handoff_addrs_len = sizeof(handoff_addrs) / sizeof(handoff_addrs[0]);
-    for (int i = 0; i < handoff_addrs_len; i++) {
-      if (addr == handoff_addrs[i]) {
-        // Without dynamic handoff: always block (preserves pre-PR static-blocking behavior).
-        // With dynamic handoff: block only when openpilot is the longitudinal authority.
-        block = !hyundai_canfd_dynamic_handoff || controls_allowed;
-        break;
-      }
+    if ((addr == 0x1a0) || hyundai_canfd_handoff_adrv_addr(addr)) {
+      // Without dynamic handoff: always block (preserves pre-PR static-blocking behavior).
+      // With dynamic handoff: block only when openpilot is the longitudinal authority.
+      block = !hyundai_canfd_dynamic_handoff || controls_allowed;
     }
   }
 

@@ -115,10 +115,6 @@ class CarInterfaceBase(ABC, CarInterfaceBaseSP):
     dbc_names = {bus: cp.dbc_name for bus, cp in self.can_parsers.items()}
     self.CC: CarControllerBase = self.CarController(dbc_names, CP, CP_SP)
 
-    # Back-reference so CarState extensions can read CarController state (e.g. handoff watchdog flags) when
-    # building the next-frame ret_sp.
-    self.CS.CC = self.CC
-
   def apply(self, c: structs.CarControl, c_sp: structs.CarControlSP, now_nanos: int | None = None) -> tuple[structs.CarControl.Actuators, list[CanData]]:
     if now_nanos is None:
       now_nanos = int(time.monotonic() * 1e9)
@@ -280,6 +276,11 @@ class CarInterfaceBase(ABC, CarInterfaceBaseSP):
     # get CarState
     ret, ret_sp = self.CS.update(self.can_parsers)
 
+    # Surface CarController-owned diagnostic state (e.g. the Hyundai dynamic-handoff watchdog) onto the SP
+    # carState here — the interface owns both CC and CS, so CarState never reads back into the controller. This
+    # reflects the value from the previous apply(), matching the prior back-reference timing.
+    ret_sp.adasDrvHandoffFault = self.CC.handoff_fault
+
     ret.canValid = all(cp.can_valid for cp in self.can_parsers.values())
     ret.canTimeout = any(cp.bus_timeout for cp in self.can_parsers.values())
 
@@ -312,11 +313,6 @@ class CarStateBase(ABC):
     self.car_fingerprint = CP.carFingerprint
     self.out = structs.CarState()
     self.out_sp = structs.CarStateSP()
-
-    # Back-reference to the CarController, wired by CarInterfaceBase.__init__ after both are built. Allows
-    # CarState extensions to read CarController state (e.g. the dynamic-handoff watchdog) when building ret_sp.
-    # Declared here (default None) so it is an explicit, type-safe attribute that reads fail-soft.
-    self.CC: CarControllerBase | None = None
 
     self.cruise_buttons = 0
     self.left_blinker_cnt = 0
@@ -414,6 +410,11 @@ class CarControllerBase(ABC):
     self.CP_SP = CP_SP
     self.frame = 0
     self.secoc_key: bytes = b"00" * 16
+
+    # Diagnostic surfaced on CarStateSP.adasDrvHandoffFault, copied out by CarInterfaceBase.update so CarState
+    # never reads back into the controller. Only the Hyundai CAN FD dynamic-handoff watchdog sets a non-none
+    # value; every other controller leaves it none.
+    self.handoff_fault: structs.CarStateSP.HandoffFault = structs.CarStateSP.HandoffFault.none
 
   @abstractmethod
   def update(self, CC: structs.CarControl, CC_SP: structs.CarControlSP, CS: CarStateBase, now_nanos: int) -> tuple[structs.CarControl.Actuators, list[CanData]]:

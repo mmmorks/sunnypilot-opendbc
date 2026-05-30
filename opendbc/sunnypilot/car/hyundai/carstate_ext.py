@@ -84,16 +84,3 @@ class CarStateExt:
     self.aBasis = cp.vl["TCS"]["aBasis"]
 
     ret_sp.speedLimit = self.update_speed_limit(cp, cp_cam) * speed_factor
-
-    # Dynamic radar handoff fault — surface CarController watchdog state through CarStateSP for selfdrived
-    # to translate into an EventName event. CC is declared on CarStateBase (default None) and back-set by
-    # CarInterfaceBase.__init__; getattr because this is a standalone mixin and handoff_fault is
-    # Hyundai-CarController-specific.
-    cc = getattr(self, 'CC', None)
-    handoff_fault = getattr(cc, 'handoff_fault', 0) if cc is not None else 0
-    if handoff_fault == 1:
-      ret_sp.adasDrvHandoffFault = structs.CarStateSP.HandoffFault.engageFailed
-    elif handoff_fault == 2:
-      ret_sp.adasDrvHandoffFault = structs.CarStateSP.HandoffFault.disengageFailed
-    else:
-      ret_sp.adasDrvHandoffFault = structs.CarStateSP.HandoffFault.none

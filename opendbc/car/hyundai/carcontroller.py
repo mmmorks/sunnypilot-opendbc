@@ -17,6 +17,7 @@ from opendbc.sunnypilot.car.hyundai.mads import MadsCarController
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
+HandoffFault = structs.CarStateSP.HandoffFault
 
 # EPS faults if you apply torque while the steering angle is above 90 degrees for more than 1 second
 # All slightly below EPS thresholds to avoid fault
@@ -85,10 +86,9 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     # requests in one frame allows the two responses to coalesce into one cycle, silently dropping an ack (false
     # timeout) or an NRC (false success). Serializing guarantees at most one response per cycle.
     # Each step is a dict: {'msg', 'expected' (positive ack byte1), 'nrc_service' (orig service id), 'sent_frame', 'deadline'}.
-    # A timed-out or NRC'd step sets self.handoff_fault, which the CarState bridge surfaces to
-    # CarStateSP.adasDrvHandoffFault and selfdrived turns into an EventName event.
-    # 0=none, 1=engageFailed (IMMEDIATE_DISABLE), 2=disengageFailed (warning only).
-    self.handoff_fault: int = 0
+    # A timed-out or NRC'd step sets self.handoff_fault (a CarStateSP.HandoffFault, declared on
+    # CarControllerBase); CarInterfaceBase.update copies it onto CarStateSP.adasDrvHandoffFault and selfdrived
+    # turns it into an EventName event. none / engageFailed (IMMEDIATE_DISABLE) / disengageFailed (warn only).
     self.handoff_fault_clear_frame: int = 0
     self._handoff_seq: list[dict] = []      # remaining sequential UDS steps for the active edge
     self._handoff_seq_kind: int = 0         # fault type to latch if the active sequence fails (1=engage, 2=disengage)
@@ -269,16 +269,17 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
             self._handoff_seq = []
             self._latch_handoff_fault(self._handoff_seq_kind)
 
-    if self.handoff_fault and self.frame >= self.handoff_fault_clear_frame:
-      self.handoff_fault = 0
+    if self.handoff_fault != HandoffFault.none and self.frame >= self.handoff_fault_clear_frame:
+      self.handoff_fault = HandoffFault.none
 
   def _latch_handoff_fault(self, kind: int) -> None:
-    # Engage fault (1) outranks disengage fault (2); never downgrade an already-latched engage fault.
-    if kind == 1 and self.handoff_fault != 1:
-      self.handoff_fault = 1
+    # Engage fault outranks disengage fault; never downgrade an already-latched engage fault. kind is the
+    # sequence kind (1=engage, 2=disengage); the latched value is the SP enum surfaced to selfdrived.
+    if kind == 1 and self.handoff_fault != HandoffFault.engageFailed:
+      self.handoff_fault = HandoffFault.engageFailed
       self.handoff_fault_clear_frame = self.frame + self.HANDOFF_FAULT_LATCH_FRAMES
-    elif kind == 2 and self.handoff_fault not in (1, 2):
-      self.handoff_fault = 2
+    elif kind == 2 and self.handoff_fault not in (HandoffFault.engageFailed, HandoffFault.disengageFailed):
+      self.handoff_fault = HandoffFault.disengageFailed
       self.handoff_fault_clear_frame = self.frame + self.HANDOFF_FAULT_LATCH_FRAMES
 
   def create_can_msgs(self, apply_steer_req, apply_torque, torque_fault, set_speed_in_units, accel, stopping, hud_control, actuators, CS, CC):
