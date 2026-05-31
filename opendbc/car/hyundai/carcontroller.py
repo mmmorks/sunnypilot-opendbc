@@ -344,8 +344,10 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
       can_sends.append(hyundaicanfd.create_suppress_lfa(self.packer, self.CAN, CS.lfa_block_msg,
                                                         self.CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG_ALT))
 
-    # LFA and HDA icons
-    if self.frame % 5 == 0 and (not lka_steering or lka_steering_long):
+    # LFA and HDA icons. Under dynamic handoff the restored ADAS DRV ECU re-broadcasts LFAHDA_CLUSTER on E-CAN
+    # whenever disengaged, so openpilot must only send it while engaged (same one-source rule as LFA above).
+    if self.frame % 5 == 0 and (not lka_steering or lka_steering_long) and \
+            (not self.dynamic_radar_handoff_enabled or CC.enabled):
       can_sends.append(hyundaicanfd.create_lfahda_cluster(self.packer, self.CAN, CC.enabled, self.lfa_icon))
 
     # blinkers

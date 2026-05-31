@@ -1,7 +1,7 @@
 import numpy as np
 from opendbc.car import CanBusBase
 from opendbc.car.crc import CRC16_XMODEM
-from opendbc.car.hyundai.values import HyundaiFlags
+from opendbc.car.hyundai.values import HyundaiFlags, HyundaiSafetyFlags
 from opendbc.sunnypilot.car.hyundai.lead_data_ext import CanFdLeadData
 
 
@@ -51,7 +51,10 @@ def create_steering_messages(packer, CP, CAN, enabled, lat_active, apply_torque,
   ret = []
   if CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG:
     lkas_msg = "LKAS_ALT" if CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG_ALT else "LKAS"
-    if CP.openpilotLongitudinalControl:
+    # Don't send LFA while disengaged under dynamic handoff: the restored ADAS DRV ECU broadcasts its own LFA on
+    # E-CAN, and two senders' counters collide at the MDPS -> lane-keep DTC. (Engaged, the ECU is silenced.)
+    dynamic_radar_handoff = bool(CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF)
+    if CP.openpilotLongitudinalControl and (not dynamic_radar_handoff or enabled):
       ret.append(packer.make_can_msg("LFA", CAN.ECAN, values))
     ret.append(packer.make_can_msg(lkas_msg, CAN.ACAN, values))
   else:
