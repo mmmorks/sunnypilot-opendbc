@@ -5,6 +5,7 @@ from opendbc.can import CANPacker
 from opendbc.car import Bus, gen_empty_fingerprint
 from opendbc.car.structs import CarParams
 from opendbc.car.hyundai.interface import CarInterface
+from opendbc.car.hyundai.carcontroller import CarController, HandoffFault
 from opendbc.car.hyundai.carstate import CarState
 from opendbc.car.hyundai import hyundaicanfd
 from opendbc.car.hyundai.hyundaicanfd import CanBus
@@ -127,6 +128,90 @@ class TestCanfdDynamicHandoff(unittest.TestCase):
     pt = _handoff_pt_parser()
     self.assertIn(UDS_RESPONSE_MSG, pt.dbc.name_to_msg)
     self.assertIn(pt.dbc.name_to_msg[UDS_RESPONSE_MSG].address, pt.message_states)
+
+
+class TestHandoffEnginePipeline(unittest.TestCase):
+  """Engage silencing is pipelined: the extendedSession (0x10 03) preamble is fire-and-forget, so the watched
+  disableRxAndTx (0x28 03) goes out one frame later instead of after the session ack round-trip. Only the
+  silencing frame's response is watched; a failed session-establish surfaces as its NRC. Disengage stays
+  fully sequential."""
+
+  def _cc(self):
+    CP = _handoff_car_params(handoff=True)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, HANDOFF_CAR)
+    return CarController({"pt": "hyundai_canfd_generated", "cam": "hyundai_canfd_generated"}, CP, CP_SP)
+
+  @staticmethod
+  def _cs(count=0, byte1=0, byte2=0):
+    return types.SimpleNamespace(adas_drv_uds_response_count=count,
+                                 adas_drv_uds_response_byte1=byte1,
+                                 adas_drv_uds_response_byte2=byte2)
+
+  def _tick(self, cc, cs, frame):
+    cc.frame = frame
+    sends = []
+    cc._tick_handoff_watchdog(cs, sends)
+    return sends
+
+  def test_engage_seq_first_step_is_fire_and_forget(self):
+    cc = self._cc()
+    seq = cc._engage_handoff_seq()
+    self.assertTrue(seq[0]['fire_and_forget'])
+    self.assertFalse(seq[1]['fire_and_forget'])
+
+  def test_disengage_seq_fully_watched(self):
+    cc = self._cc()
+    seq = cc._disengage_handoff_seq()
+    self.assertFalse(seq[0]['fire_and_forget'])
+    self.assertFalse(seq[1]['fire_and_forget'])
+
+  def test_silencing_frame_sent_without_waiting_for_session_ack(self):
+    cc = self._cc()
+    cc._handoff_seq = cc._engage_handoff_seq()
+    cc._handoff_seq_kind = 1
+    cs = self._cs()
+    sends0 = self._tick(cc, cs, 0)
+    self.assertEqual(len(sends0), 1)
+    self.assertEqual(sends0[0][1][1], 0x10)
+    sends1 = self._tick(cc, cs, 1)
+    self.assertEqual(len(sends1), 1)
+    self.assertEqual(sends1[0][1][1], 0x28)
+
+  def test_success_on_silencing_ack(self):
+    cc = self._cc()
+    cc._handoff_seq = cc._engage_handoff_seq()
+    cc._handoff_seq_kind = 1
+    cs = self._cs()
+    self._tick(cc, cs, 0)
+    self._tick(cc, cs, 1)
+    self._tick(cc, self._cs(count=1, byte1=0x68), 2)
+    self.assertEqual(cc._handoff_seq, [])
+    self.assertEqual(cc.handoff_fault, HandoffFault.none)
+
+  def test_engage_failed_on_silencing_nrc(self):
+    cc = self._cc()
+    cc._handoff_seq = cc._engage_handoff_seq()
+    cc._handoff_seq_kind = 1
+    cs = self._cs()
+    self._tick(cc, cs, 0)
+    self._tick(cc, cs, 1)
+    self._tick(cc, self._cs(count=1, byte1=0x7F, byte2=0x28), 2)
+    self.assertEqual(cc.handoff_fault, HandoffFault.engageFailed)
+
+  def test_silencing_timeout_retries_before_latch(self):
+    cc = self._cc()
+    cc._handoff_seq = cc._engage_handoff_seq()
+    cc._handoff_seq_kind = 1
+    cs = self._cs()
+    self._tick(cc, cs, 0)
+    self._tick(cc, cs, 1)
+    self._tick(cc, cs, 1 + cc.HANDOFF_RESPONSE_DEADLINE_FRAMES + 1)
+    self.assertEqual(cc.handoff_fault, HandoffFault.none)
+    self.assertTrue(cc._handoff_seq)
+    resend = self._tick(cc, cs, 1 + cc.HANDOFF_RESPONSE_DEADLINE_FRAMES + 2)
+    self.assertEqual(len(resend), 1)
+    self.assertEqual(resend[0][1][1], 0x28)
+    self.assertEqual(cc.handoff_fault, HandoffFault.none)
 
 
 if __name__ == "__main__":

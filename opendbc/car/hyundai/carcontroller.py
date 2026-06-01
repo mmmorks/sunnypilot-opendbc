@@ -166,12 +166,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     # control first, then session) so each response is observed on its own cycle. Responses on 0x738 are NOT
     # suppressed so positive acks ("68 00", "50 01") and NRCs ("7F 28 <code>", "7F 10 <code>") land in logs.
     if disengage_edge:
-      self._handoff_seq = [
-        self._make_handoff_step(make_communication_control_msg(0x730, self.CAN.ECAN, sub_function=0x00, suppress_response=False),
-                                expected=0x68, nrc_service=0x28),
-        self._make_handoff_step(make_diagnostic_session_control_msg(0x730, self.CAN.ECAN, sub_function=0x01, suppress_response=False),
-                                expected=0x50, nrc_service=0x10),
-      ]
+      self._handoff_seq = self._disengage_handoff_seq()
       self._handoff_seq_kind = 2
 
     # dynamic handoff: on disengage->engage edge, re-silence the ADAS DRV ECU. Boot disable was skipped under
@@ -180,12 +175,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     # disableRxAndTx (which panda only accepts while controls_allowed) — sequencing also allows controls_allowed to
     # settle before the silencing frame is sent. A new edge supersedes any in-flight sequence.
     if engage_edge:
-      self._handoff_seq = [
-        self._make_handoff_step(make_diagnostic_session_control_msg(0x730, self.CAN.ECAN, sub_function=0x03, suppress_response=False),
-                                expected=0x50, nrc_service=0x10),
-        self._make_handoff_step(make_communication_control_msg(0x730, self.CAN.ECAN, sub_function=0x03, suppress_response=False),
-                                expected=0x68, nrc_service=0x28),
-      ]
+      self._handoff_seq = self._engage_handoff_seq()
       self._handoff_seq_kind = 1
 
     # Watchdog tick: send the next pending UDS step, consume its response, latch faults on NRC/timeout.
@@ -216,11 +206,28 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self.frame += 1
     return new_actuators, can_sends
 
-  def _make_handoff_step(self, msg, expected, nrc_service):
+  def _make_handoff_step(self, msg, expected, nrc_service, fire_and_forget=False):
     # One sequential UDS step for the handoff watchdog. retries_left allows a timed-out step to be re-sent before
-    # it escalates to a latched fault (see HANDOFF_STEP_MAX_RETRIES).
-    return {'msg': msg, 'expected': expected, 'nrc_service': nrc_service,
+    # it escalates to a latched fault (see HANDOFF_STEP_MAX_RETRIES). fire_and_forget steps are dropped the tick
+    # after they send, without waiting for an ack.
+    return {'msg': msg, 'expected': expected, 'nrc_service': nrc_service, 'fire_and_forget': fire_and_forget,
             'sent_frame': None, 'deadline': None, 'retries_left': self.HANDOFF_STEP_MAX_RETRIES}
+
+  def _engage_handoff_seq(self):
+    return [
+      self._make_handoff_step(make_diagnostic_session_control_msg(0x730, self.CAN.ECAN, sub_function=0x03, suppress_response=False),
+                              expected=0x50, nrc_service=0x10, fire_and_forget=True),
+      self._make_handoff_step(make_communication_control_msg(0x730, self.CAN.ECAN, sub_function=0x03, suppress_response=False),
+                              expected=0x68, nrc_service=0x28),
+    ]
+
+  def _disengage_handoff_seq(self):
+    return [
+      self._make_handoff_step(make_communication_control_msg(0x730, self.CAN.ECAN, sub_function=0x00, suppress_response=False),
+                              expected=0x68, nrc_service=0x28),
+      self._make_handoff_step(make_diagnostic_session_control_msg(0x730, self.CAN.ECAN, sub_function=0x01, suppress_response=False),
+                              expected=0x50, nrc_service=0x10),
+    ]
 
   def _tick_handoff_watchdog(self, CS, can_sends):
     """Advance the dynamic-handoff response watchdog. Called every tick when dynamic handoff is enabled.
@@ -242,6 +249,10 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
       response_byte1 = CS.adas_drv_uds_response_byte1
       response_byte2 = CS.adas_drv_uds_response_byte2
       response_is_nrc = response_byte1 == 0x7F
+
+    # Drop already-sent fire-and-forget steps so the next watched step sends this tick (no ack wait).
+    while self._handoff_seq and self._handoff_seq[0]['fire_and_forget'] and self._handoff_seq[0]['sent_frame'] is not None:
+      self._handoff_seq.pop(0)
 
     if self._handoff_seq:
       step = self._handoff_seq[0]
