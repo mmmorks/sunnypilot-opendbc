@@ -213,6 +213,22 @@ class TestHandoffEnginePipeline(unittest.TestCase):
     self.assertEqual(resend[0][1][1], 0x28)
     self.assertEqual(cc.handoff_fault, HandoffFault.none)
 
+  def test_stale_session_ack_ignored_then_success(self):
+    cc = self._cc()
+    cc._handoff_seq = cc._engage_handoff_seq()
+    cc._handoff_seq_kind = 1
+    cs = self._cs()
+    self._tick(cc, cs, 0)   # send 0x10 03 (fire-and-forget)
+    self._tick(cc, cs, 1)   # drop preamble, send 0x28 03 (watched)
+    # the dropped step's late 0x50 session ack arrives -> must be ignored: seq still pending, no fault
+    self._tick(cc, self._cs(count=1, byte1=0x50), 2)
+    self.assertTrue(cc._handoff_seq)
+    self.assertEqual(cc.handoff_fault, HandoffFault.none)
+    # then the real 0x68 silencing ack arrives -> success
+    self._tick(cc, self._cs(count=2, byte1=0x68), 3)
+    self.assertEqual(cc._handoff_seq, [])
+    self.assertEqual(cc.handoff_fault, HandoffFault.none)
+
 
 if __name__ == "__main__":
   unittest.main()
