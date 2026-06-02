@@ -399,9 +399,9 @@ class TestHyundaiHandoffWatchdog(unittest.TestCase):
     return CarController({"pt": "hyundai_canfd_generated", "cam": "hyundai_canfd_generated"}, CP, CP_SP)
 
   @staticmethod
-  def _step(expected, nrc_service, retries=0):
-    return {'msg': None, 'expected': expected, 'nrc_service': nrc_service, 'sent_frame': None,
-            'deadline': None, 'retries_left': retries}
+  def _step(expected, nrc_service, retries=0, fire_and_forget=False):
+    return {'msg': None, 'expected': expected, 'nrc_service': nrc_service, 'fire_and_forget': fire_and_forget,
+            'sent_frame': None, 'deadline': None, 'retries_left': retries}
 
   def _engage_edge(self, cc):
     """Set up the engage-edge sequential watchdog steps the carcontroller would build on a real edge."""
