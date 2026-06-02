@@ -347,14 +347,14 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
 
     return can_sends
 
-  def create_canfd_msgs(self, apply_steer_req, apply_torque, set_speed_in_units, accel, stopping, hud_control, CS, CC, handoff_active=False):
+  def create_canfd_msgs(self, apply_steer_req, apply_torque, set_speed_in_units, accel, stopping, hud_control, CS, CC, handoff_active):
     can_sends = []
 
     lka_steering = self.CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG
     lka_steering_long = lka_steering and self.CP.openpilotLongitudinalControl
 
     # steering control
-    can_sends.extend(hyundaicanfd.create_steering_messages(self.packer, self.CP, self.CAN, CC.enabled, apply_steer_req, apply_torque, self.lkas_icon))
+    can_sends.extend(hyundaicanfd.create_steering_messages(self.packer, self.CP, self.CAN, handoff_active, apply_steer_req, apply_torque, self.lkas_icon))
 
     # prevent LFA from activating on LKA steering cars by sending "no lane lines detected" to ADAS ECU
     if self.frame % 5 == 0 and lka_steering:
@@ -362,9 +362,9 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
                                                         self.CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG_ALT))
 
     # LFA and HDA icons. Under dynamic handoff the restored ADAS DRV ECU re-broadcasts LFAHDA_CLUSTER on E-CAN
-    # whenever disengaged, so openpilot must only send it while engaged (same one-source rule as LFA above).
+    # whenever fully disengaged, so openpilot must only send it while handoff_active (MADS-lateral or longitudinal).
     if self.frame % 5 == 0 and (not lka_steering or lka_steering_long) and \
-            (not self.dynamic_radar_handoff_enabled or CC.enabled):
+            (not self.dynamic_radar_handoff_enabled or handoff_active):
       can_sends.append(hyundaicanfd.create_lfahda_cluster(self.packer, self.CAN, CC.enabled, self.lfa_icon))
 
     # blinkers
@@ -372,7 +372,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
       can_sends.extend(hyundaicanfd.create_spas_messages(self.packer, self.CAN, CC.leftBlinker, CC.rightBlinker))
 
     if self.CP.openpilotLongitudinalControl:
-      if not (self.dynamic_radar_handoff_enabled and not CC.enabled):
+      if not (self.dynamic_radar_handoff_enabled and not handoff_active):
         if lka_steering:
           can_sends.extend(hyundaicanfd.create_adrv_messages(self.packer, self.CAN, self.frame))
         else:

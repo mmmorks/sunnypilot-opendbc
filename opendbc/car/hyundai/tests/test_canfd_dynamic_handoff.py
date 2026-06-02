@@ -48,24 +48,25 @@ class TestHandoffSteeringHandoff(unittest.TestCase):
   MDPS -> counter-validation fault -> lane-keep DTC. So openpilot must be the LFA source ONLY while engaged
   (when the ECU is silenced); otherwise the ECU is the sole source.
   """
-  def _lfa_count(self, CP, enabled):
+  def _lfa_count(self, CP, handoff_active):
     packer = CANPacker("hyundai_canfd_generated")
     CAN = CanBus(CP)
-    msgs = hyundaicanfd.create_steering_messages(packer, CP, CAN, enabled, enabled, 0, 0)
+    msgs = hyundaicanfd.create_steering_messages(packer, CP, CAN, handoff_active, handoff_active, 0, 0)
     return sum(1 for addr, _, bus in msgs if addr == LFA and bus == CAN.ECAN)
 
-  def test_no_lfa_when_disengaged_under_handoff(self):
-    self.assertEqual(self._lfa_count(_handoff_car_params(handoff=True), enabled=False), 0)
+  def test_no_lfa_when_fully_disengaged_under_handoff(self):
+    self.assertEqual(self._lfa_count(_handoff_car_params(handoff=True), handoff_active=False), 0)
 
-  def test_lfa_present_when_engaged_under_handoff(self):
-    self.assertEqual(self._lfa_count(_handoff_car_params(handoff=True), enabled=True), 1)
+  def test_lfa_present_when_handoff_active(self):
+    # handoff_active is True for MADS-lateral OR longitudinal; LFA-on-E-CAN must be present either way.
+    self.assertEqual(self._lfa_count(_handoff_car_params(handoff=True), handoff_active=True), 1)
 
   def test_lfa_always_present_without_handoff(self):
     # Static-disable cars keep the ADAS DRV ECU dead all drive, so openpilot must stay the sole continuous LFA
     # source regardless of engagement -- gating it off would leave the MDPS with no LFA -> timeout fault.
     CP = _handoff_car_params(handoff=False)
-    self.assertEqual(self._lfa_count(CP, enabled=False), 1)
-    self.assertEqual(self._lfa_count(CP, enabled=True), 1)
+    self.assertEqual(self._lfa_count(CP, handoff_active=False), 1)
+    self.assertEqual(self._lfa_count(CP, handoff_active=True), 1)
 
 
 class TestHandoffClusterHandoff(unittest.TestCase):
@@ -81,25 +82,41 @@ class TestHandoffClusterHandoff(unittest.TestCase):
     return CarController({"pt": "hyundai_canfd_generated", "cam": "hyundai_canfd_generated"}, CP, CP_SP)
 
   @staticmethod
-  def _fakes(enabled):
+  def _fakes(enabled, mads_enabled=False):
     cs = types.SimpleNamespace(lfa_block_msg={f"BYTE{i}": 0 for i in range(3, 32)} | {"COUNTER": 0},
                                main_cruise_enabled=False)
     cc = types.SimpleNamespace(enabled=enabled, leftBlinker=False, rightBlinker=False,
                                cruiseControl=types.SimpleNamespace(override=False))
-    return cs, cc
+    cc_sp = types.SimpleNamespace(mads=types.SimpleNamespace(enabled=mads_enabled))
+    return cs, cc, cc_sp
 
-  def _lfahda_count(self, enabled, handoff=True):
+  def _lfahda_count(self, enabled, handoff=True, mads_enabled=False):
     cc_ctrl = self._build_controller(handoff)
     cc_ctrl.frame = 5  # %5==0 so LFAHDA_CLUSTER is due; %2!=0 so the heavy acc_control path is skipped
-    cs, cc = self._fakes(enabled)
-    msgs = cc_ctrl.create_canfd_msgs(False, 0, 0, 0.0, False, types.SimpleNamespace(), cs, cc)
+    cs, cc, cc_sp = self._fakes(enabled, mads_enabled)
+    handoff_active = cc_ctrl._handoff_active(cc, cc_sp)
+    msgs = cc_ctrl.create_canfd_msgs(False, 0, 0, 0.0, False, types.SimpleNamespace(), cs, cc, handoff_active)
     return sum(1 for addr, _, _ in msgs if addr == self.LFAHDA)
 
-  def test_no_lfahda_cluster_when_disengaged_under_handoff(self):
-    self.assertEqual(self._lfahda_count(enabled=False, handoff=True), 0)
+  def test_no_lfahda_cluster_when_fully_disengaged_under_handoff(self):
+    self.assertEqual(self._lfahda_count(enabled=False, handoff=True, mads_enabled=False), 0)
 
   def test_lfahda_cluster_present_when_engaged_under_handoff(self):
     self.assertEqual(self._lfahda_count(enabled=True, handoff=True), 1)
+
+  def test_lfahda_cluster_present_on_mads_lateral_under_handoff(self):
+    self.assertEqual(self._lfahda_count(enabled=False, handoff=True, mads_enabled=True), 1)
+
+  def test_scc_and_adrv_present_on_mads_lateral(self):
+    cc_ctrl = self._build_controller(handoff=True)
+    cc_ctrl.frame = 0  # %2==0 so acc_control path runs
+    cs, cc, cc_sp = self._fakes(enabled=False, mads_enabled=True)
+    handoff_active = cc_ctrl._handoff_active(cc, cc_sp)
+    hud_control = types.SimpleNamespace(leadDistanceBars=0)
+    msgs = cc_ctrl.create_canfd_msgs(False, 0, 0, 0.0, False, hud_control, cs, cc, handoff_active)
+    addrs = {addr for addr, _, _ in msgs}
+    self.assertIn(0x1a0, addrs)   # SCC_CONTROL impersonated (inactive)
+    self.assertIn(0x160, addrs)   # an ADRV broadcast
 
 
 class TestCanfdDynamicHandoff(unittest.TestCase):

@@ -36,7 +36,7 @@ class CanBus(CanBusBase):
     return self._cam
 
 
-def create_steering_messages(packer, CP, CAN, enabled, lat_active, apply_torque, lkas_icon):
+def create_steering_messages(packer, CP, CAN, handoff_active, lat_active, apply_torque, lkas_icon):
   values = {
     "LKA_OptUsmSta": 2,
     "LKA_SysIndReq": lkas_icon,
@@ -51,10 +51,11 @@ def create_steering_messages(packer, CP, CAN, enabled, lat_active, apply_torque,
   ret = []
   if CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG:
     lkas_msg = "LKAS_ALT" if CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG_ALT else "LKAS"
-    # Don't send LFA while disengaged under dynamic handoff: the restored ADAS DRV ECU broadcasts its own LFA on
-    # E-CAN, and two senders' counters collide at the MDPS -> lane-keep DTC. (Engaged, the ECU is silenced.)
+    # Don't send LFA while fully disengaged under dynamic handoff: the restored ADAS DRV ECU broadcasts its own LFA on
+    # E-CAN, and two senders' counters collide at the MDPS -> lane-keep DTC. While openpilot owns the ECU
+    # (handoff_active: MADS-lateral or longitudinal) the ECU is silenced, so openpilot is the sole LFA source.
     dynamic_radar_handoff = bool(CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF)
-    if CP.openpilotLongitudinalControl and (not dynamic_radar_handoff or enabled):
+    if CP.openpilotLongitudinalControl and (not dynamic_radar_handoff or handoff_active):
       ret.append(packer.make_can_msg("LFA", CAN.ECAN, values))
     ret.append(packer.make_can_msg(lkas_msg, CAN.ACAN, values))
   else:
