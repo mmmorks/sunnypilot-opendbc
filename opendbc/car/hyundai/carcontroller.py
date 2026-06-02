@@ -77,7 +77,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self.cancel_counter = 0
 
     self.dynamic_radar_handoff_enabled = bool(CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF)
-    self.prev_enabled = False
+    self.prev_handoff_active = False
 
     # Dynamic radar handoff response watchdog.
     # On an engage/disengage edge we build a SEQUENTIAL list of UDS steps. Only one request is ever outstanding
@@ -102,10 +102,16 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     # Latch fault for 5s (500 frames) so selfdrived has time to observe and post the event.
     self.HANDOFF_FAULT_LATCH_FRAMES: int = 500
 
+  def _handoff_active(self, CC, CC_SP):
+    # openpilot owns the ADAS DRV ECU role under EITHER authority: MADS lateral (latched, blinker-pause-stable)
+    # or longitudinal engage. Mirrors panda's controls_allowed || controls_allowed_lateral.
+    return self.dynamic_radar_handoff_enabled and (CC.enabled or CC_SP.mads.enabled)
+
   def update(self, CC, CC_SP, CS, now_nanos):
     EsccCarController.update(self, CS)
     LeadDataCarController.update(self, CC_SP)
     MadsCarController.update(self, self.CP, CC, CC_SP, self.frame)
+    handoff_active = self._handoff_active(CC, CC_SP)
     if self.frame % 5 == 0:
       LongitudinalController.update(self, CC, CS)
 
@@ -131,12 +137,12 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     stopping = actuators.longControlState == LongCtrlState.stopping
     set_speed_in_units = hud_control.setSpeed * (CV.MS_TO_KPH if CS.is_metric else CV.MS_TO_MPH)
 
-    # dynamic_radar_handoff_enabled is derived from the CANFD_DYNAMIC_HANDOFF safety bit, which
-    # _initialize_dynamic_radar_handoff only sets when every precondition holds (HDA II, radar-disable
-    # capable, not camera-SCC, and openpilotLongitudinalControl). So the bit alone is authoritative here —
-    # the engage and disengage edges gate on the same predicate, symmetrically.
-    disengage_edge = self.prev_enabled and not CC.enabled and self.dynamic_radar_handoff_enabled
-    engage_edge = not self.prev_enabled and CC.enabled and self.dynamic_radar_handoff_enabled
+    # handoff_active folds the CANFD_DYNAMIC_HANDOFF safety bit together with "openpilot owns the car"
+    # (lateral or longitudinal authority); see _handoff_active. Engage and disengage edges gate on the same
+    # predicate, symmetrically, so adding longitudinal on top of an active MADS-lateral handoff never re-fires
+    # the engage edge and a full disengage restores the stock ECU exactly once.
+    disengage_edge = self.prev_handoff_active and not handoff_active
+    engage_edge = not self.prev_handoff_active and handoff_active
 
     can_sends = []
 
@@ -145,7 +151,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     # tester present - w/ no response (keeps relevant ECU disabled)
     if self.frame % 100 == 0 and not ((self.CP.flags & HyundaiFlags.CANFD_CAMERA_SCC) or self.ESCC.enabled) and \
             self.CP.openpilotLongitudinalControl and \
-            (not self.dynamic_radar_handoff_enabled or CC.enabled):
+            (not self.dynamic_radar_handoff_enabled or handoff_active):
       # for longitudinal control, either radar or ADAS driving ECU
       addr, bus = 0x7d0, self.CAN.ECAN if self.CP.flags & HyundaiFlags.CANFD else 0
       if self.CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG.value:
@@ -185,7 +191,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     # *** CAN/CAN FD specific ***
     if self.CP.flags & HyundaiFlags.CANFD:
       can_sends.extend(self.create_canfd_msgs(apply_steer_req, apply_torque, set_speed_in_units, accel,
-                                              stopping, hud_control, CS, CC))
+                                              stopping, hud_control, CS, CC, handoff_active))
     else:
       # Hold torque with induced temporary fault when cutting the actuation bit
       # FIXME: we don't use this with CAN FD?
@@ -202,7 +208,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     new_actuators.torqueOutputCan = apply_torque
     new_actuators.accel = self.tuning.actual_accel
 
-    self.prev_enabled = CC.enabled
+    self.prev_handoff_active = handoff_active
     self.frame += 1
     return new_actuators, can_sends
 
@@ -341,7 +347,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
 
     return can_sends
 
-  def create_canfd_msgs(self, apply_steer_req, apply_torque, set_speed_in_units, accel, stopping, hud_control, CS, CC):
+  def create_canfd_msgs(self, apply_steer_req, apply_torque, set_speed_in_units, accel, stopping, hud_control, CS, CC, handoff_active=False):
     can_sends = []
 
     lka_steering = self.CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG

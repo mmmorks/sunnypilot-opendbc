@@ -230,5 +230,54 @@ class TestHandoffEnginePipeline(unittest.TestCase):
     self.assertEqual(cc.handoff_fault, HandoffFault.none)
 
 
+class TestHandoffActivePredicate(unittest.TestCase):
+  """handoff_active = dynamic_radar_handoff_enabled AND (CC.enabled OR CC_SP.mads.enabled).
+  This is the 'openpilot owns the ADAS DRV ECU' predicate that drives silence/restore + impersonation."""
+  def _cc_ctrl(self, handoff=True):
+    CP = _handoff_car_params(handoff)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, HANDOFF_CAR)
+    return CarController({"pt": "hyundai_canfd_generated", "cam": "hyundai_canfd_generated"}, CP, CP_SP)
+
+  @staticmethod
+  def _cc_ccsp(enabled, mads_enabled):
+    cc = types.SimpleNamespace(enabled=enabled)
+    cc_sp = types.SimpleNamespace(mads=types.SimpleNamespace(enabled=mads_enabled))
+    return cc, cc_sp
+
+  def test_active_on_long_only(self):
+    cc_ctrl = self._cc_ctrl()
+    cc, cc_sp = self._cc_ccsp(enabled=True, mads_enabled=False)
+    self.assertTrue(cc_ctrl._handoff_active(cc, cc_sp))
+
+  def test_active_on_mads_lateral_only(self):
+    cc_ctrl = self._cc_ctrl()
+    cc, cc_sp = self._cc_ccsp(enabled=False, mads_enabled=True)
+    self.assertTrue(cc_ctrl._handoff_active(cc, cc_sp))
+
+  def test_inactive_when_fully_disengaged(self):
+    cc_ctrl = self._cc_ctrl()
+    cc, cc_sp = self._cc_ccsp(enabled=False, mads_enabled=False)
+    self.assertFalse(cc_ctrl._handoff_active(cc, cc_sp))
+
+  def test_inactive_without_handoff_flag(self):
+    cc_ctrl = self._cc_ctrl(handoff=False)
+    cc, cc_sp = self._cc_ccsp(enabled=True, mads_enabled=True)
+    self.assertFalse(cc_ctrl._handoff_active(cc, cc_sp))
+
+  def test_engage_edge_fires_on_mads_lateral(self):
+    """A MADS-lateral engage (mads.enabled rising, CC.enabled False) must arm the engage silencing sequence."""
+    cc_ctrl = self._cc_ctrl()
+    self.assertFalse(cc_ctrl.prev_handoff_active)
+    cc, cc_sp = self._cc_ccsp(enabled=False, mads_enabled=True)
+    active = cc_ctrl._handoff_active(cc, cc_sp)
+    engage_edge = not cc_ctrl.prev_handoff_active and active
+    self.assertTrue(engage_edge)
+    cc_ctrl.prev_handoff_active = active
+    # adding longitudinal later must NOT re-fire an engage edge
+    cc2, cc_sp2 = self._cc_ccsp(enabled=True, mads_enabled=True)
+    active2 = cc_ctrl._handoff_active(cc2, cc_sp2)
+    self.assertFalse(not cc_ctrl.prev_handoff_active and active2)
+
+
 if __name__ == "__main__":
   unittest.main()
