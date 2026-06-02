@@ -114,9 +114,20 @@ class TestHandoffClusterHandoff(unittest.TestCase):
     handoff_active = cc_ctrl._handoff_active(cc, cc_sp)
     hud_control = types.SimpleNamespace(leadDistanceBars=0)
     msgs = cc_ctrl.create_canfd_msgs(False, 0, 0, 0.0, False, hud_control, cs, cc, handoff_active)
-    addrs = {addr for addr, _, _ in msgs}
-    self.assertIn(0x1a0, addrs)   # SCC_CONTROL impersonated (inactive)
-    self.assertIn(0x160, addrs)   # an ADRV broadcast
+    by_addr = {addr: dat for addr, dat, _ in msgs}
+    self.assertIn(0x1a0, by_addr)   # SCC_CONTROL impersonated
+    self.assertIn(0x160, by_addr)   # an ADRV broadcast
+
+    # SCC_CONTROL must be INERT on MADS-lateral: CC.enabled is False, so create_acc_control sets ACCMode=0 and
+    # zero accel. This is the panda-legality crux (panda only accepts inactive SCC_CONTROL while controls_allowed
+    # is false) and guards against the active flag being wired to handoff_active instead of CC.enabled.
+    from opendbc.can import CANParser
+    CAN = CanBus(cc_ctrl.CP)
+    parser = CANParser("hyundai_canfd_generated", [("SCC_CONTROL", 0)], CAN.ECAN)
+    parser.update([0, [(0x1a0, by_addr[0x1a0], CAN.ECAN)]])
+    self.assertEqual(parser.vl["SCC_CONTROL"]["ACCMode"], 0)
+    self.assertEqual(parser.vl["SCC_CONTROL"]["aReqRaw"], 0)
+    self.assertEqual(parser.vl["SCC_CONTROL"]["aReqValue"], 0)
 
 
 class TestCanfdDynamicHandoff(unittest.TestCase):
