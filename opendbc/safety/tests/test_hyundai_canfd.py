@@ -495,6 +495,48 @@ class TestHyundaiCanfdLKASteeringLongDynamicHandoff(TestHyundaiCanfdLKASteeringL
     so the acc_main_on mismatch recovery cannot be driven via TX. Not applicable here.
     """
 
+  def test_dynamic_handoff_scc_control_allowed_with_controls_allowed_lateral(self):
+    """Inactive SCC_CONTROL must be accepted when only controls_allowed_lateral is set (MADS-lateral)."""
+    self.safety.set_controls_allowed(False)
+    self.safety.set_controls_allowed_lateral(True)
+    msg = self.packer.make_can_msg_safety("SCC_CONTROL", self.PT_BUS, {"aReqRaw": 0.0, "aReqValue": 0.0})
+    self.assertTrue(self._tx(msg))
+
+  def test_dynamic_handoff_scc_control_nonzero_blocked_with_only_lateral(self):
+    """A real (non-zero) accel SCC_CONTROL must still be rejected when only controls_allowed_lateral is set."""
+    self.safety.set_controls_allowed(False)
+    self.safety.set_controls_allowed_lateral(True)
+    msg = self.packer.make_can_msg_safety("SCC_CONTROL", self.PT_BUS, {"aReqRaw": 1.0, "aReqValue": 1.0})
+    self.assertFalse(self._tx(msg))
+
+  def test_dynamic_handoff_adrv_0x160_allowed_with_controls_allowed_lateral(self):
+    """ADRV impersonation must be accepted when only controls_allowed_lateral is set."""
+    from opendbc.safety.tests.libsafety import libsafety_py as _lspy
+    self.safety.set_controls_allowed(False)
+    self.safety.set_controls_allowed_lateral(True)
+    msg = _lspy.make_CANPacket(0x160, 1, b'\x00' * 16)
+    self.assertTrue(self._tx(msg))
+
+  def test_uds_730_silencing_frame_allowed_with_controls_allowed_lateral(self):
+    """disableRxAndTx must be accepted on a MADS-lateral engage (controls_allowed_lateral set)."""
+    from opendbc.safety.tests.libsafety import libsafety_py as _lspy
+    silencing_frame = b"\x03\x28\x03\x01\x00\x00\x00\x00"
+    self.safety.set_controls_allowed(False)
+    self.safety.set_controls_allowed_lateral(True)
+    self.assertTrue(self._tx(_lspy.make_CANPacket(0x730, 1, silencing_frame)))
+
+  def test_fwd_hook_scc_control_blocked_when_controls_allowed_lateral(self):
+    """When MADS-lateral owns the ECU role, the stock SCC_CONTROL must NOT be forwarded."""
+    self.safety.set_controls_allowed(False)
+    self.safety.set_controls_allowed_lateral(True)
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x1A0))
+
+  def test_fwd_hook_adrv_0x160_blocked_when_controls_allowed_lateral(self):
+    """When MADS-lateral owns the ECU role, stock ADRV 0x160 must NOT be forwarded."""
+    self.safety.set_controls_allowed(False)
+    self.safety.set_controls_allowed_lateral(True)
+    self.assertEqual(-1, self.safety.safety_fwd_hook(2, 0x160))
+
 
 class TestHyundaiCanfdNoHandoffRegression(TestHyundaiCanfdLKASteeringLongEV):
   """

@@ -56,9 +56,9 @@ static unsigned int hyundai_canfd_get_lka_addr(void) {
   return hyundai_canfd_lka_steer_msg_alt ? 0x110U : 0x50U;
 }
 
-// ADRV DRV ECU broadcast addresses. Under dynamic handoff openpilot impersonates these while engaged, so they
-// must be gated on controls_allowed identically in the tx hook (openpilot's own transmits) and the fwd hook
-// (the stock ECU's broadcasts) — sharing one list keeps the two callers in sync. 0x1A0 (SCC_CONTROL) shares the
+// ADRV DRV ECU broadcast addresses. Under dynamic handoff openpilot impersonates these while it owns the car, so
+// they must be gated on (controls_allowed || controls_allowed_lateral) identically in the tx hook (openpilot's own
+// transmits) and the fwd hook (the stock ECU's broadcasts) — sharing one list keeps the two callers in sync. 0x1A0 (SCC_CONTROL) shares the
 // same gating but is handled separately by each caller (the tx hook runs an accel safety check on it; the fwd
 // hook lists it alongside this call), so it is intentionally not included here.
 static bool hyundai_canfd_handoff_adrv_addr(int addr) {
@@ -181,10 +181,11 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *msg) {
 
   bool tx = true;
 
-  // Under dynamic handoff, block longitudinal commands when controls are not allowed.
-  // This prevents the ADAS unit from issuing accel/decel while the handoff is in progress.
+  // Block openpilot's SCC_CONTROL/ADRV impersonation only when openpilot owns neither authority (fully disengaged).
+  // Under MADS-lateral (controls_allowed_lateral) the stock ECU is silenced, so openpilot must impersonate it;
+  // the accel check below still requires inactive accel without controls_allowed.
   bool handoff_blocked = false;
-  if (hyundai_canfd_dynamic_handoff && !controls_allowed) {
+  if (hyundai_canfd_dynamic_handoff && !(controls_allowed || controls_allowed_lateral)) {
     if (((msg->addr == 0x1a0U) && hyundai_longitudinal) || hyundai_canfd_handoff_adrv_addr(msg->addr)) {
       handoff_blocked = true;
     }
@@ -227,16 +228,15 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *msg) {
   if (((msg->addr == 0x730U) && hyundai_canfd_lka_steer_msg) || ((msg->addr == 0x7D0U) && !hyundai_camera_scc)) {
     bool is_tester_present = (GET_BYTES(msg, 0, 4) == 0x00803E02U) && (GET_BYTES(msg, 4, 4) == 0x0U);
     // The re-enable/session frames only ever RESTORE the stock ECU, so they are safe to allow in any state.
-    // disableRxAndTx (0x28 0x03) SILENCES the stock SCC/AEB and must only be permitted while openpilot is the
-    // longitudinal authority (controls_allowed) — otherwise a stray edge could leave the car with no active
-    // longitudinal safety. The carcontroller sequences extendedSession before it, so controls_allowed has
-    // settled by the time the silencing frame is emitted.
+    // disableRxAndTx (0x28 0x03) SILENCES the stock SCC/AEB and must only be permitted while openpilot owns the car
+    // under lateral OR longitudinal authority (controls_allowed || controls_allowed_lateral) — the silencing frame
+    // is permitted while openpilot owns the car under either authority, never when fully disengaged.
     bool is_handoff_frame = hyundai_canfd_dynamic_handoff && (msg->addr == 0x730U) &&
                             (GET_BYTES(msg, 4, 4) == 0x0U) &&
                             ((GET_BYTES(msg, 0, 4) == 0x01002803U) ||  // 0x28 enableRxAndTx       (disengage 1) — restores stock
                              (GET_BYTES(msg, 0, 4) == 0x00011002U) ||  // 0x10 defaultSession      (disengage 2) — restores stock
                              (GET_BYTES(msg, 0, 4) == 0x00031002U) ||  // 0x10 extendedSession     (engage 1)   — does not silence
-                             ((GET_BYTES(msg, 0, 4) == 0x01032803U) && controls_allowed));  // 0x28 disableRxAndTx (engage 2) — silences: engaged only
+                             ((GET_BYTES(msg, 0, 4) == 0x01032803U) && (controls_allowed || controls_allowed_lateral)));  // 0x28 disableRxAndTx (engage 2) — silences: lat or long authority
     if (!is_tester_present && !is_handoff_frame) {
       tx = false;
     }
@@ -282,9 +282,8 @@ static bool hyundai_canfd_fwd_hook(int bus_num, int addr) {
   // LFA-steering long uses static TX-list blocking (check_relay) for 0x1A0.
   if (hyundai_longitudinal && hyundai_canfd_lka_steer_msg) {
     if ((addr == 0x1a0) || hyundai_canfd_handoff_adrv_addr(addr)) {
-      // Without dynamic handoff: always block (preserves pre-PR static-blocking behavior).
-      // With dynamic handoff: block only when openpilot is the longitudinal authority.
-      block = !hyundai_canfd_dynamic_handoff || controls_allowed;
+      // With dynamic handoff: block stock forwarding when openpilot owns the ECU role under either authority (lat or long).
+      block = !hyundai_canfd_dynamic_handoff || controls_allowed || controls_allowed_lateral;
     }
   }
 
