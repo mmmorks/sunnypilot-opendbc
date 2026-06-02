@@ -3,6 +3,7 @@ from opendbc.testing import parameterized_class
 import unittest
 
 from opendbc.car.hyundai.values import HyundaiSafetyFlags
+from opendbc.sunnypilot.car.hyundai.values import HyundaiSafetyFlagsSP
 from opendbc.car.structs import CarParams
 from opendbc.safety.tests.libsafety import libsafety_py
 import opendbc.safety.tests.common as common
@@ -293,6 +294,21 @@ class TestHyundaiCanfdLFASteeringLong(TestHyundaiCanfdLFASteeringLongBase):
       cls.safety = None
       raise unittest.SkipTest
 
+  def test_main_cruise_no_longitudinal_grant_without_flag(self):
+    """Without MAIN_ENGAGES_OP_LONG, a main-cruise press toggles acc_main_on but must NOT grant
+    longitudinal controls_allowed (regression guard)."""
+    default_sp = self.safety.get_current_safety_param_sp()
+    self.safety.set_current_safety_param_sp(default_sp | HyundaiSafetyFlagsSP.LONG_MAIN_CRUISE_TOGGLEABLE)
+    self.safety.set_safety_hooks(self.safety.get_current_safety_mode(), self.safety.get_current_safety_param())
+
+    self.assertFalse(self.safety.get_controls_allowed())
+    self._rx(self._main_cruise_button_msg(0))
+    self._rx(self._main_cruise_button_msg(1))
+    self.assertTrue(self.safety.get_acc_main_on())
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    self.safety.set_current_safety_param_sp(default_sp)
+
 
 @parameterized_class(ALL_GAS_EV_HYBRID_COMBOS)
 class TestHyundaiCanfdLFASteeringLongAltButtons(TestHyundaiCanfdLFASteeringLongBase, TestHyundaiCanfdLFASteeringAltButtonsBase):
@@ -336,6 +352,48 @@ class TestHyundaiCanfdLKASteeringLongDynamicHandoff(TestHyundaiCanfdLKASteeringL
                                  HyundaiSafetyFlags.LONG | HyundaiSafetyFlags.EV_GAS |
                                  HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF)
     self.safety.init_tests()
+
+  def test_main_cruise_engages_longitudinal(self):
+    """With MAIN_ENGAGES_OP_LONG under dynamic handoff, a main-cruise press grants longitudinal
+    controls_allowed (engage), and a second press (main off) revokes it — so a single main press
+    engages op long (and lets op silence the stock SCC) instead of tripping controlsMismatch."""
+    default_sp = self.safety.get_current_safety_param_sp()
+    self.safety.set_current_safety_param_sp(default_sp | HyundaiSafetyFlagsSP.LONG_MAIN_CRUISE_TOGGLEABLE
+                                            | HyundaiSafetyFlagsSP.MAIN_ENGAGES_OP_LONG)
+    self.safety.set_safety_hooks(self.safety.get_current_safety_mode(), self.safety.get_current_safety_param())
+
+    self.assertFalse(self.safety.get_acc_main_on())
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    # main press (rising edge) -> acc_main_on on -> longitudinal authority granted
+    self._rx(self._main_cruise_button_msg(0))
+    self._rx(self._main_cruise_button_msg(1))
+    self.assertTrue(self.safety.get_acc_main_on())
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    # second main press (toggle off) -> acc_main_on off -> longitudinal authority revoked
+    self._rx(self._main_cruise_button_msg(0))
+    self._rx(self._main_cruise_button_msg(1))
+    self.assertFalse(self.safety.get_acc_main_on())
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    self.safety.set_current_safety_param_sp(default_sp)
+
+  def test_main_cruise_no_grant_without_flag_under_handoff(self):
+    """Same dynamic-handoff class, but WITHOUT MAIN_ENGAGES_OP_LONG: a main press toggles
+    acc_main_on yet must NOT grant longitudinal controls_allowed. Isolates the flag as the
+    sole cause of the grant."""
+    default_sp = self.safety.get_current_safety_param_sp()
+    self.safety.set_current_safety_param_sp(default_sp | HyundaiSafetyFlagsSP.LONG_MAIN_CRUISE_TOGGLEABLE)
+    self.safety.set_safety_hooks(self.safety.get_current_safety_mode(), self.safety.get_current_safety_param())
+
+    self.assertFalse(self.safety.get_controls_allowed())
+    self._rx(self._main_cruise_button_msg(0))
+    self._rx(self._main_cruise_button_msg(1))
+    self.assertTrue(self.safety.get_acc_main_on())
+    self.assertFalse(self.safety.get_controls_allowed())
+
+    self.safety.set_current_safety_param_sp(default_sp)
 
   def test_disabled_ecu_alive(self):
     """Under dynamic handoff the ADAS DRV ECU is intentionally NOT knocked out — it stays alive and broadcasts

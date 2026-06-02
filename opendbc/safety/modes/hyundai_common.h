@@ -57,6 +57,9 @@ bool hyundai_escc = false;
 extern bool hyundai_longitudinal_main_cruise_toggleable;
 bool hyundai_longitudinal_main_cruise_toggleable = false;
 
+extern bool hyundai_main_engages_op_long;
+bool hyundai_main_engages_op_long = false;
+
 extern bool hyundai_has_lda_button;
 bool hyundai_has_lda_button = false;
 
@@ -89,6 +92,7 @@ void hyundai_common_init(uint16_t param) {
 
   hyundai_escc = GET_FLAG(current_safety_param_sp, HYUNDAI_PARAM_SP_ESCC);
   hyundai_longitudinal_main_cruise_toggleable = GET_FLAG(current_safety_param_sp, HYUNDAI_PARAM_SP_LONGITUDINAL_MAIN_CRUISE_TOGGLEABLE);
+  hyundai_main_engages_op_long = GET_FLAG(current_safety_param_sp, HYUNDAI_PARAM_SP_MAIN_ENGAGES_OP_LONG);
   hyundai_has_lda_button = GET_FLAG(current_safety_param_sp, HYUNDAI_PARAM_SP_HAS_LDA_BUTTON);
   hyundai_non_scc = GET_FLAG(current_safety_param_sp, HYUNDAI_PARAM_SP_NON_SCC);
 
@@ -147,6 +151,11 @@ void hyundai_common_cruise_buttons_check(const int cruise_button, const bool mai
     // toggle main cruise state on rising edge of main cruise button
     if (main_button && !main_button_prev && hyundai_longitudinal_main_cruise_toggleable) {
       acc_main_on = !acc_main_on;
+
+      // main-engages-op cars: main press also grants/revokes op longitudinal authority (flag mirrors selfdrived's enable)
+      if (hyundai_main_engages_op_long) {
+        controls_allowed = acc_main_on;
+      }
     }
 
     cruise_button_prev = cruise_button;
