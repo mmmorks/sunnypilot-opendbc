@@ -48,11 +48,25 @@ class TestHandoffSteeringHandoff(unittest.TestCase):
   MDPS -> counter-validation fault -> lane-keep DTC. So openpilot must be the LFA source ONLY while engaged
   (when the ECU is silenced); otherwise the ECU is the sole source.
   """
-  def _lfa_count(self, CP, handoff_active):
+  def _lfa_msgs(self, CP, lfa_send_ok, lfa_counter=0):
     packer = CANPacker("hyundai_canfd_generated")
     CAN = CanBus(CP)
-    msgs = hyundaicanfd.create_steering_messages(packer, CP, CAN, handoff_active, handoff_active, 0, 0)
-    return sum(1 for addr, _, bus in msgs if addr == LFA and bus == CAN.ECAN)
+    msgs = hyundaicanfd.create_steering_messages(packer, CP, CAN, lfa_send_ok, lfa_send_ok, 0, 0, lfa_counter)
+    return [(addr, dat, bus) for addr, dat, bus in msgs if addr == LFA and bus == CAN.ECAN]
+
+  def _lfa_count(self, CP, handoff_active):
+    return len(self._lfa_msgs(CP, handoff_active))
+
+  def test_lfa_counter_continues_from_seed(self):
+    from opendbc.can import CANParser
+    CP = _handoff_car_params(handoff=True)
+    CAN = CanBus(CP)
+    msgs = self._lfa_msgs(CP, lfa_send_ok=True, lfa_counter=0x37)
+    self.assertEqual(len(msgs), 1)
+    _, dat, _ = msgs[0]
+    parser = CANParser("hyundai_canfd_generated", [("LFA", 0)], CAN.ECAN)
+    parser.update([0, [(LFA, dat, CAN.ECAN)]])
+    self.assertEqual(parser.vl["LFA"]["COUNTER"], 0x37)
 
   def test_no_lfa_when_fully_disengaged_under_handoff(self):
     self.assertEqual(self._lfa_count(_handoff_car_params(handoff=True), handoff_active=False), 0)

@@ -36,7 +36,7 @@ class CanBus(CanBusBase):
     return self._cam
 
 
-def create_steering_messages(packer, CP, CAN, handoff_active, lat_active, apply_torque, lkas_icon):
+def create_steering_messages(packer, CP, CAN, lfa_send_ok, lat_active, apply_torque, lkas_icon, lfa_counter=0):
   values = {
     "LKA_OptUsmSta": 2,
     "LKA_SysIndReq": lkas_icon,
@@ -52,11 +52,13 @@ def create_steering_messages(packer, CP, CAN, handoff_active, lat_active, apply_
   if CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG:
     lkas_msg = "LKAS_ALT" if CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG_ALT else "LKAS"
     # Don't send LFA while fully disengaged under dynamic handoff: the restored ADAS DRV ECU broadcasts its own LFA on
-    # E-CAN, and two senders' counters collide at the MDPS -> lane-keep DTC. While openpilot owns the ECU
-    # (handoff_active: MADS-lateral or longitudinal) the ECU is silenced, so openpilot is the sole LFA source.
+    # E-CAN, and two senders' counters collide at the MDPS -> lane-keep DTC. lfa_send_ok folds in BOTH "openpilot owns
+    # the ECU" AND "the ECU is confirmed silenced" (carcontroller), so openpilot is never the second LFA source. On
+    # takeover we continue the stock ECU's COUNTER (lfa_counter) so the MDPS sees one unbroken sequence.
     dynamic_radar_handoff = bool(CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF)
-    if CP.openpilotLongitudinalControl and (not dynamic_radar_handoff or handoff_active):
-      ret.append(packer.make_can_msg("LFA", CAN.ECAN, values))
+    if CP.openpilotLongitudinalControl and (not dynamic_radar_handoff or lfa_send_ok):
+      lfa_values = {**values, "COUNTER": lfa_counter} if dynamic_radar_handoff else values
+      ret.append(packer.make_can_msg("LFA", CAN.ECAN, lfa_values))
     ret.append(packer.make_can_msg(lkas_msg, CAN.ACAN, values))
   else:
     ret.append(packer.make_can_msg("LFA", CAN.ECAN, values))
