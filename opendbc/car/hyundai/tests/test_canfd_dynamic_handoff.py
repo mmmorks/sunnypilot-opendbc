@@ -449,5 +449,147 @@ class TestHandoffSilenceGate(unittest.TestCase):
     self.assertEqual(seen, [0x21, 0x22])   # stock last 0x20 -> op continues 0x21, 0x22
 
 
+class TestHandoffFirstEngageIntegration(unittest.TestCase):
+  """End-to-end integration tests that drive the REAL cc.update() method across multiple frames.
+
+  These close two code-review gaps left by unit-level tests:
+    1. test_counter_seeds_from_stock_and_continues re-implemented update()'s seed/advance logic inline;
+       these tests call the real method so wiring deletions would break them.
+    2. No existing test drove update() through a disengage_edge to confirm _reset_handoff_silence_state()
+       is actually called by update() (not just reachable on its own).
+  """
+
+  def _make_cp(self):
+    fingerprint = gen_empty_fingerprint()
+    fingerprint[CanBus(None, fingerprint).CAM][0x50] = 8
+    adas_fw = [CarParams.CarFw(ecu=CarParams.Ecu.adas, fwVersion=b'test', address=0x0, subAddress=0)]
+    CP = CarInterface.get_params(HANDOFF_CAR, fingerprint, adas_fw, True, False, False)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, HANDOFF_CAR)
+    setup_interfaces(CarInterface, CP, CP_SP, [{"DynamicRadarHandoffEnabled": "1"}, {"AlphaLongitudinalEnabled": "1"}])
+    return CP, CP_SP
+
+  def _make_cc(self):
+    CP, CP_SP = self._make_cp()
+    return CarController({"pt": "hyundai_canfd_generated", "cam": "hyundai_canfd_generated"}, CP, CP_SP)
+
+  @staticmethod
+  def _cs(count=0, byte1=0, byte2=0, lfa_counter=0):
+    """Minimal fake CarState with every field touched by update() or its callees."""
+    import types
+    return types.SimpleNamespace(
+      adas_drv_uds_response_count=count,
+      adas_drv_uds_response_byte1=byte1,
+      adas_drv_uds_response_byte2=byte2,
+      adrv_lfa_counter=lfa_counter,
+      out=types.SimpleNamespace(steeringTorque=0, steeringAngleDeg=0),
+      is_metric=False,
+      main_cruise_enabled=False,
+      lfa_block_msg={f"BYTE{i}": 0 for i in range(3, 32)} | {"COUNTER": 0},
+      buttons_counter=0,
+      # ESCC fields (EsccCarController.update reads these via update_car_state)
+      escc_cmd_act=0,
+      escc_aeb_warning=0,
+      escc_aeb_dec_cmd_act=0,
+      escc_aeb_dec_cmd=0,
+    )
+
+  @staticmethod
+  def _cc_msg(mads_enabled=True, long_enabled=False):
+    """Real capnp CarControl (as_reader so actuators.as_builder() works) + CarControlSP dataclass."""
+    from opendbc.car.structs import CarControl, CarControlSP
+    cc_b = CarControl.new_message()
+    cc_b.latActive = mads_enabled
+    cc_b.enabled = long_enabled
+    CC = cc_b.as_reader()
+    CC_SP = CarControlSP()
+    CC_SP.mads.enabled = mads_enabled
+    return CC, CC_SP
+
+  def _advance_to_silenced(self, cc, stock_lfa_counter=0x20):
+    """Drive cc through the full engage+silence handshake and return the ack-frame can_sends.
+
+    Frame 0: engage edge -> extendedSession (fire-and-forget) sent.
+    Frame 1: disableRxAndTx sent.
+    Frame 2: 0x68 ack arrives -> adrv_silenced latches True.
+    Returns can_sends from frame 2 (the takeover frame).
+    """
+    from opendbc.can import CANParser
+    CC, CC_SP = self._cc_msg(mads_enabled=True)
+    cc.update(CC, CC_SP, self._cs(), 0)
+    cc.update(CC, CC_SP, self._cs(), 1)
+    _, can_sends = cc.update(CC, CC_SP,
+                             self._cs(count=1, byte1=0x68, lfa_counter=stock_lfa_counter), 2)
+    return CC, CC_SP, can_sends
+
+  # (a) On a fresh engage (handoff_active rising, adrv_silenced False), update() emits NO LFA on
+  #     E-CAN and the returned actuators carry zero torque (lateral held).
+  def test_a_fresh_engage_withholds_lfa_and_holds_torque(self):
+    from opendbc.car.structs import CarControl, CarControlSP
+    cc = self._make_cc()
+    CAN = cc.CAN
+
+    CC_b = CarControl.new_message()
+    CC_b.latActive = True
+    CC_b.actuators.torque = 1.0   # non-zero command; update() should zero it
+    CC = CC_b.as_reader()
+    CC_SP = CarControlSP()
+    CC_SP.mads.enabled = True
+
+    actuators, can_sends = cc.update(CC, CC_SP, self._cs(), 0)
+
+    lfa_on_ecan = [a for a, _, b in can_sends if a == LFA and b == CAN.ECAN]
+    self.assertEqual(lfa_on_ecan, [], "LFA must be withheld before adrv_silenced")
+    self.assertEqual(actuators.torqueOutputCan, 0, "lateral torque must be held to zero before silencing")
+    self.assertFalse(cc.adrv_silenced)
+
+  # (b) After the 0x68 silence ack propagates through CS, the FIRST update() that sends LFA must use
+  #     counter == (stock adrv_lfa_counter + 1) & 0xFF, and the following frame's counter is +1 again.
+  def test_b_lfa_counter_seeds_from_stock_via_update(self):
+    from opendbc.can import CANParser
+    STOCK_CTR = 0x20
+    cc = self._make_cc()
+    CAN = cc.CAN
+    parser = CANParser("hyundai_canfd_generated", [("LFA", 0)], CAN.ECAN)
+
+    CC, CC_SP, ack_sends = self._advance_to_silenced(cc, stock_lfa_counter=STOCK_CTR)
+    self.assertTrue(cc.adrv_silenced)
+
+    # Collect LFA counters from the takeover frame and the next frame; both come from real update() wiring.
+    seen_counters = []
+    for frame_idx, sends in enumerate(
+      [ack_sends] + [cc.update(CC, CC_SP, self._cs(lfa_counter=STOCK_CTR), 3 + i)[1] for i in range(1)]
+    ):
+      lfa = [(a, d, b) for a, d, b in sends if a == LFA and b == CAN.ECAN]
+      self.assertEqual(len(lfa), 1, f"Expected exactly one LFA on E-CAN at frame {frame_idx}")
+      parser.update([0, [(LFA, lfa[0][1], CAN.ECAN)]])
+      seen_counters.append(int(parser.vl["LFA"]["COUNTER"]))
+
+    self.assertEqual(seen_counters[0], (STOCK_CTR + 1) & 0xFF,
+                     f"takeover frame: counter should be stock+1 = {hex((STOCK_CTR+1)&0xFF)}, got {hex(seen_counters[0])}")
+    self.assertEqual(seen_counters[1], (STOCK_CTR + 2) & 0xFF,
+                     f"next frame: counter should be stock+2 = {hex((STOCK_CTR+2)&0xFF)}, got {hex(seen_counters[1])}")
+
+  # (c) A disengage_edge (handoff_active falling) in update() must call _reset_handoff_silence_state(),
+  #     clearing adrv_silenced / silence_timeout / prev_lfa_send_ok.
+  def test_c_disengage_edge_resets_silence_state_via_update(self):
+    from opendbc.car.structs import CarControlSP
+    cc = self._make_cc()
+
+    # Bring cc into a post-silenced, LFA-sending state.
+    CC, CC_SP, _ = self._advance_to_silenced(cc, stock_lfa_counter=0x30)
+    self.assertTrue(cc.adrv_silenced)
+    # One more frame to ensure prev_lfa_send_ok is set
+    cc.update(CC, CC_SP, self._cs(lfa_counter=0x30), 3)
+    self.assertTrue(cc.prev_lfa_send_ok)
+
+    # Disengage: both CC.enabled and CC_SP.mads.enabled → False.
+    CC_dis, CC_SP_dis = self._cc_msg(mads_enabled=False, long_enabled=False)
+    cc.update(CC_dis, CC_SP_dis, self._cs(), 4)
+
+    self.assertFalse(cc.adrv_silenced,    "adrv_silenced must clear on disengage_edge via update()")
+    self.assertFalse(cc.silence_timeout,  "silence_timeout must clear on disengage_edge via update()")
+    self.assertFalse(cc.prev_lfa_send_ok, "prev_lfa_send_ok must clear on disengage_edge via update()")
+
+
 if __name__ == "__main__":
   unittest.main()
