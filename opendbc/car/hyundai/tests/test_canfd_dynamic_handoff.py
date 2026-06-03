@@ -327,5 +327,63 @@ class TestHandoffActivePredicate(unittest.TestCase):
     self.assertFalse(not cc_ctrl.prev_handoff_active and active2)
 
 
+class TestHandoffSilenceGate(unittest.TestCase):
+  """adrv_silenced latches True only when the engage disableRxAndTx (0x68) ack lands; silence_timeout latches
+  True if the engage silence sequence fails (NRC or retry-exhausted). Both reset on disengage."""
+  def _cc(self):
+    CP = _handoff_car_params(handoff=True)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, HANDOFF_CAR)
+    return CarController({"pt": "hyundai_canfd_generated", "cam": "hyundai_canfd_generated"}, CP, CP_SP)
+
+  @staticmethod
+  def _cs(count=0, byte1=0, byte2=0, lfa_counter=0):
+    return types.SimpleNamespace(adas_drv_uds_response_count=count, adas_drv_uds_response_byte1=byte1,
+                                 adas_drv_uds_response_byte2=byte2, adrv_lfa_counter=lfa_counter)
+
+  def _tick(self, cc, cs, frame):
+    cc.frame = frame
+    cc._tick_handoff_watchdog(cs, [])
+
+  def test_initial_state(self):
+    cc = self._cc()
+    self.assertFalse(cc.adrv_silenced)
+    self.assertFalse(cc.silence_timeout)
+
+  def test_adrv_silenced_on_silencing_ack(self):
+    cc = self._cc()
+    cc._handoff_seq = cc._engage_handoff_seq()
+    cc._handoff_seq_kind = 1
+    self._tick(cc, self._cs(), 0)            # send extendedSession (fire-and-forget)
+    self._tick(cc, self._cs(), 1)            # send disableRxAndTx (watched)
+    self.assertFalse(cc.adrv_silenced)
+    self._tick(cc, self._cs(count=1, byte1=0x68), 2)  # silence ack
+    self.assertTrue(cc.adrv_silenced)
+    self.assertFalse(cc.silence_timeout)
+
+  def test_silence_timeout_on_engage_nrc(self):
+    cc = self._cc()
+    cc._handoff_seq = cc._engage_handoff_seq()
+    cc._handoff_seq_kind = 1
+    self._tick(cc, self._cs(), 0)
+    self._tick(cc, self._cs(), 1)
+    self._tick(cc, self._cs(count=1, byte1=0x7F, byte2=0x28), 2)  # NRC for 0x28
+    self.assertFalse(cc.adrv_silenced)
+    self.assertTrue(cc.silence_timeout)
+
+  def test_silence_state_resets_on_disengage(self):
+    cc = self._cc()
+    cc.adrv_silenced = True
+    cc.silence_timeout = True
+    cc._reset_handoff_silence_state()
+    self.assertFalse(cc.adrv_silenced)
+    self.assertFalse(cc.silence_timeout)
+
+  def test_faster_retry_window(self):
+    cc = self._cc()
+    self.assertLessEqual(cc.HANDOFF_RESPONSE_DEADLINE_FRAMES, 10)
+    total = cc.HANDOFF_RESPONSE_DEADLINE_FRAMES * (cc.HANDOFF_STEP_MAX_RETRIES + 1)
+    self.assertGreaterEqual(total, 150)
+
+
 if __name__ == "__main__":
   unittest.main()

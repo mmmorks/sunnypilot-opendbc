@@ -79,6 +79,15 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self.dynamic_radar_handoff_enabled = bool(CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF)
     self.prev_handoff_active = False
 
+    # first-engage LFA handoff: openpilot withholds its own LFA(0x12a) + lateral actuation until the stock ADRV
+    # ECU is confirmed silenced, so the two senders' counters never collide at the MDPS. adrv_silenced latches on
+    # the disableRxAndTx ack; silence_timeout opens the gate anyway if the silence handshake fails (lateral works,
+    # transient collision accepted) rather than withholding steering forever.
+    self.adrv_silenced = False
+    self.silence_timeout = False
+    self.prev_lfa_send_ok = False
+    self.lfa_counter = 0
+
     # Dynamic radar handoff response watchdog.
     # On an engage/disengage edge we build a SEQUENTIAL list of UDS steps. Only one request is ever outstanding
     # at a time: the watchdog sends step N, waits for its specific ack on 0x738, then sends step N+1. This is
@@ -93,12 +102,14 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     self._handoff_seq: list[dict] = []      # remaining sequential UDS steps for the active edge
     self._handoff_seq_kind: int = 0         # fault type to latch if the active sequence fails (1=engage, 2=disengage)
     self._handoff_last_response_seen_count: int = 0
-    # Window in which we accept each step's ack. 50 frames @ 100Hz = 500ms; UDS S6/S7 typically <50ms.
-    self.HANDOFF_RESPONSE_DEADLINE_FRAMES: int = 50
-    # Re-send a step this many times on timeout before latching a fault. Absorbs transient drops — notably
-    # panda rejecting the engage silencing frame (disableRxAndTx) until controls_allowed has settled, and
-    # one-off CAN losses — without escalating straight to IMMEDIATE_DISABLE. NRCs are NOT retried.
-    self.HANDOFF_STEP_MAX_RETRIES: int = 3
+    # Window in which we accept each step's ack. 8 frames @ 100Hz = 80ms; UDS S6/S7 typically <50ms. Kept short so
+    # the engage silencing frame — which panda drops until controls_allowed settles (a few frames after engage) —
+    # retries quickly instead of stalling lateral for a full window. See HANDOFF_STEP_MAX_RETRIES for total budget.
+    self.HANDOFF_RESPONSE_DEADLINE_FRAMES: int = 8
+    # Re-send a step this many times on timeout before latching a fault. Raised so the total budget
+    # (window * (retries+1)) stays ~2s despite the shorter window. Absorbs the panda controls_allowed settle and
+    # one-off CAN losses without escalating to IMMEDIATE_DISABLE. NRCs are NOT retried.
+    self.HANDOFF_STEP_MAX_RETRIES: int = 24
     # Latch fault for 5s (500 frames) so selfdrived has time to observe and post the event.
     self.HANDOFF_FAULT_LATCH_FRAMES: int = 500
 
@@ -174,6 +185,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     if disengage_edge:
       self._handoff_seq = self._disengage_handoff_seq()
       self._handoff_seq_kind = 2
+      self._reset_handoff_silence_state()
 
     # dynamic handoff: on disengage->engage edge, re-silence the ADAS DRV ECU. Boot disable was skipped under
     # dynamic handoff so the ECU is in default session here; the 1Hz tester-present that resumes this frame
@@ -272,6 +284,9 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
         matched_nrc = response_is_nrc and response_byte2 == step['nrc_service']
         if matched_positive:
           self._handoff_seq.pop(0)  # success → next step sends on the following tick
+          # engage sequence's only watched step is disableRxAndTx; emptying it under kind==1 = stock ECU silenced.
+          if self._handoff_seq_kind == 1 and not self._handoff_seq:
+            self.adrv_silenced = True
         elif matched_nrc:
           # Explicit ECU rejection — retrying won't help, latch immediately.
           self._handoff_seq = []
@@ -289,9 +304,18 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     if self.handoff_fault != HandoffFault.none and self.frame >= self.handoff_fault_clear_frame:
       self.handoff_fault = HandoffFault.none
 
+  def _reset_handoff_silence_state(self) -> None:
+    self.adrv_silenced = False
+    self.silence_timeout = False
+    self.prev_lfa_send_ok = False
+
   def _latch_handoff_fault(self, kind: int) -> None:
     # Engage fault outranks disengage fault; never downgrade an already-latched engage fault. kind is the
     # sequence kind (1=engage, 2=disengage); the latched value is the SP enum surfaced to selfdrived.
+    if kind == 1:
+      # engage silence failed (NRC or retry-exhausted) → open the LFA gate so lateral still works (accepting the
+      # transient collision) rather than withholding steering indefinitely.
+      self.silence_timeout = True
     if kind == 1 and self.handoff_fault != HandoffFault.engageFailed:
       self.handoff_fault = HandoffFault.engageFailed
       self.handoff_fault_clear_frame = self.frame + self.HANDOFF_FAULT_LATCH_FRAMES
