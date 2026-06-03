@@ -79,6 +79,9 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
     self.adas_drv_uds_response_byte3: int = 0
     self.adas_drv_uds_response_count: int = 0  # parser counter; carcontroller compares against snapshots
     self._prev_adas_drv_uds_response_count: int = 0
+    # first-engage LFA handoff: latest stock ADRV LFA(0x12a) COUNTER (E-CAN). Only meaningful while the stock ECU
+    # is live (pre-silence); the carcontroller reads it once at takeover to continue the counter seamlessly.
+    self.adrv_lfa_counter: int = 0
 
   def recent_button_interaction(self) -> bool:
     # On some newer model years, the CANCEL button acts as a pause/resume button based on the PCM state
@@ -333,6 +336,7 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
         self.adas_drv_uds_response_byte1 = int(cp.vl["ADAS_DRV_UDS_RESPONSE"]["UDS_BYTE_1"])
         self.adas_drv_uds_response_byte2 = int(cp.vl["ADAS_DRV_UDS_RESPONSE"]["UDS_BYTE_2"])
         self.adas_drv_uds_response_byte3 = int(cp.vl["ADAS_DRV_UDS_RESPONSE"]["UDS_BYTE_3"])
+      self.adrv_lfa_counter = int(cp.vl["LFA"]["COUNTER"])
 
     ret.blockPcmEnable = not self.recent_button_interaction()
 
@@ -349,6 +353,10 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
     # dynamic radar handoff: subscribe to ADAS DRV ECU UDS responses (sporadic; expected only on engage/disengage edges)
     if CP.safetyConfigs and CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF:
       msgs += [("ADAS_DRV_UDS_RESPONSE", float('nan'))]
+      # first-engage LFA handoff: snapshot the stock ADRV LFA(0x12a) COUNTER to seed openpilot's LFA counter at
+      # takeover. ignore-alive (NaN): after silence the physical-bus LFA stops (op's echo is on ECAN+128), and an
+      # alive-checked LFA would then invalidate the bus.
+      msgs += [("LFA", float('nan'))]
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], msgs, CanBus(CP).ECAN),
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).CAM),

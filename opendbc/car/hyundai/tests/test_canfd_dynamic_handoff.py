@@ -131,6 +131,26 @@ class TestHandoffClusterHandoff(unittest.TestCase):
 
 
 class TestCanfdDynamicHandoff(unittest.TestCase):
+  def test_lfa_counter_subscribed_ignore_alive(self):
+    # The stock ADRV LFA (0x12a) counter is snapshotted to seed openpilot's LFA counter at takeover. It must be
+    # ignore-alive: after openpilot silences the ECU, the physical-bus LFA stops (op's own echoes on ECAN+128,
+    # which this E-CAN parser never sees), and an alive-checked LFA would then invalidate the bus.
+    pt = _handoff_pt_parser()
+    lfa_addr = pt.dbc.name_to_msg["LFA"].address
+    self.assertEqual(lfa_addr, 0x12a)
+    self.assertIn(lfa_addr, pt.message_states)
+    self.assertTrue(pt.message_states[lfa_addr].ignore_alive,
+                    "LFA must be registered ignore-alive (NaN freq) so a silenced ECU never gates can_valid")
+
+  def test_adrv_lfa_counter_snapshotted(self):
+    from opendbc.car.hyundai.carstate import CarState
+    CP = CarInterface.get_non_essential_params(HANDOFF_CAR)
+    CP.safetyConfigs[-1].safetyParam = int(CP.safetyConfigs[-1].safetyParam | HyundaiSafetyFlags.CANFD_DYNAMIC_HANDOFF)
+    cs = CarState(CP, CarInterface.get_non_essential_params_sp(CP, HANDOFF_CAR))
+    self.assertEqual(cs.adrv_lfa_counter, 0)
+    cs.adrv_lfa_counter = 0x42  # stand-in for a parsed COUNTER; field exists and is writable
+    self.assertEqual(cs.adrv_lfa_counter, 0x42)
+
   def test_uds_response_does_not_gate_can_valid(self):
     # The ADAS DRV UDS response (0x738) is sporadic: it only arrives in reply to the carcontroller's
     # engage/disengage-edge requests. It must be registered ignore-alive (NaN frequency) so its absence does
