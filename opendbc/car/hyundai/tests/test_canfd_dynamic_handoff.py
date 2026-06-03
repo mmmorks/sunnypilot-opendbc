@@ -398,6 +398,56 @@ class TestHandoffSilenceGate(unittest.TestCase):
     total = cc.HANDOFF_RESPONSE_DEADLINE_FRAMES * (cc.HANDOFF_STEP_MAX_RETRIES + 1)
     self.assertGreaterEqual(total, 150)
 
+  def _fakes(self, mads_enabled=True):
+    cs = types.SimpleNamespace(
+      lfa_block_msg={f"BYTE{i}": 0 for i in range(3, 32)} | {"COUNTER": 0},
+      main_cruise_enabled=False, adrv_lfa_counter=0x10,
+      out=types.SimpleNamespace(steeringTorque=0, steeringAngleDeg=0),
+    )
+    cc = types.SimpleNamespace(enabled=False, latActive=True, leftBlinker=False, rightBlinker=False,
+                               cruiseControl=types.SimpleNamespace(override=False, cancel=False),
+                               actuators=types.SimpleNamespace(torque=1.0, accel=0.0, longControlState=None),
+                               hudControl=types.SimpleNamespace(setSpeed=0, leftLaneVisible=False,
+                                                                rightLaneVisible=False, leadDistanceBars=0))
+    cc_sp = types.SimpleNamespace(mads=types.SimpleNamespace(enabled=mads_enabled))
+    return cs, cc, cc_sp
+
+  def _lfa_from_canfd(self, cc, lfa_send_ok, lfa_counter):
+    cs, cc_obj, _ = self._fakes()
+    cc.frame = 1
+    msgs = cc.create_canfd_msgs(1, 100, 0.0, 0.0, False, cc_obj.hudControl, cs, cc_obj, True, lfa_send_ok, lfa_counter)
+    return [(addr, dat, bus) for addr, dat, bus in msgs if addr == 0x12a and bus == cc.CAN.ECAN]
+
+  def test_no_lfa_emitted_until_silenced(self):
+    cc = self._cc()
+    self.assertEqual(self._lfa_from_canfd(cc, lfa_send_ok=False, lfa_counter=0), [])  # handshake: withheld
+    self.assertEqual(len(self._lfa_from_canfd(cc, lfa_send_ok=True, lfa_counter=0x11)), 1)  # after silence
+
+  def test_counter_seeds_from_stock_and_continues(self):
+    from opendbc.can import CANParser
+    cc = self._cc()
+    cc.adrv_silenced = True               # post-takeover
+    cc.prev_lfa_send_ok = False           # this frame is the takeover edge
+    cs, cc_obj, cc_sp = self._fakes()
+    cs.adrv_lfa_counter = 0x20
+    parser = CANParser("hyundai_canfd_generated", [("LFA", 0)], cc.CAN.ECAN)
+    seen = []
+    for _ in range(2):
+      handoff_active = cc._handoff_active(cc_obj, cc_sp)
+      steer_takeover_ok = cc.adrv_silenced or cc.silence_timeout
+      lfa_send_ok = handoff_active and steer_takeover_ok
+      if lfa_send_ok and not cc.prev_lfa_send_ok:
+        cc.lfa_counter = (cs.adrv_lfa_counter + 1) & 0xFF
+      cc.frame = 1
+      msgs = cc.create_canfd_msgs(1, 100, 0.0, 0.0, False, cc_obj.hudControl, cs, cc_obj, handoff_active, lfa_send_ok, cc.lfa_counter)
+      dat = next(d for a, d, b in msgs if a == 0x12a and b == cc.CAN.ECAN)
+      parser.update([0, [(0x12a, dat, cc.CAN.ECAN)]])
+      seen.append(parser.vl["LFA"]["COUNTER"])
+      if lfa_send_ok:
+        cc.lfa_counter = (cc.lfa_counter + 1) & 0xFF
+      cc.prev_lfa_send_ok = lfa_send_ok
+    self.assertEqual(seen, [0x21, 0x22])   # stock last 0x20 -> op continues 0x21, 0x22
+
 
 if __name__ == "__main__":
   unittest.main()

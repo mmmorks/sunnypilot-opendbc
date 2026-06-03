@@ -200,10 +200,25 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     if self.dynamic_radar_handoff_enabled:
       self._tick_handoff_watchdog(CS, can_sends)
 
+    # first-engage LFA handoff: until the stock ADRV ECU is confirmed silenced, openpilot must not become the
+    # second LFA(0x12a) sender (counter collision -> MDPS LkaFailSta -> spurious steerTempUnavailable). Hold
+    # lateral and withhold op's LFA until the disableRxAndTx ack lands (adrv_silenced) or the handshake gives up.
+    steer_takeover_ok = self.adrv_silenced or self.silence_timeout
+    lfa_send_ok = handoff_active and steer_takeover_ok
+    if handoff_active and not steer_takeover_ok:
+      apply_steer_req = 0
+      apply_torque = 0
+      self.apply_torque_last = apply_torque
+    # seed op's LFA counter from the stock ECU's last value at the takeover instant, then continue it each frame
+    if lfa_send_ok and not self.prev_lfa_send_ok:
+      self.lfa_counter = (CS.adrv_lfa_counter + 1) & 0xFF
+
     # *** CAN/CAN FD specific ***
     if self.CP.flags & HyundaiFlags.CANFD:
       can_sends.extend(self.create_canfd_msgs(apply_steer_req, apply_torque, set_speed_in_units, accel,
-                                              stopping, hud_control, CS, CC, handoff_active))
+                                              stopping, hud_control, CS, CC, handoff_active, lfa_send_ok, self.lfa_counter))
+      if lfa_send_ok:
+        self.lfa_counter = (self.lfa_counter + 1) & 0xFF
     else:
       # Hold torque with induced temporary fault when cutting the actuation bit
       # FIXME: we don't use this with CAN FD?
@@ -221,6 +236,7 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
     new_actuators.accel = self.tuning.actual_accel
 
     self.prev_handoff_active = handoff_active
+    self.prev_lfa_send_ok = lfa_send_ok
     self.frame += 1
     return new_actuators, can_sends
 
@@ -371,14 +387,14 @@ class CarController(CarControllerBase, EsccCarController, LeadDataCarController,
 
     return can_sends
 
-  def create_canfd_msgs(self, apply_steer_req, apply_torque, set_speed_in_units, accel, stopping, hud_control, CS, CC, handoff_active):
+  def create_canfd_msgs(self, apply_steer_req, apply_torque, set_speed_in_units, accel, stopping, hud_control, CS, CC, handoff_active, lfa_send_ok=False, lfa_counter=0):
     can_sends = []
 
     lka_steering = self.CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG
     lka_steering_long = lka_steering and self.CP.openpilotLongitudinalControl
 
     # steering control
-    can_sends.extend(hyundaicanfd.create_steering_messages(self.packer, self.CP, self.CAN, handoff_active, apply_steer_req, apply_torque, self.lkas_icon))
+    can_sends.extend(hyundaicanfd.create_steering_messages(self.packer, self.CP, self.CAN, lfa_send_ok, apply_steer_req, apply_torque, self.lkas_icon, lfa_counter))
 
     # prevent LFA from activating on LKA steering cars by sending "no lane lines detected" to ADAS ECU
     if self.frame % 5 == 0 and lka_steering:
